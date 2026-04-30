@@ -141,3 +141,11 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# ignore cubism sdk and model files
+**/live2dcubism/**
+!**/live2dcubism/**/
+!**/live2dcubism/**/.gitkeep
+**/models/**
+!**/models/**/
+!**/models/**/.gitkeep
