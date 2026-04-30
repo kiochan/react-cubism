@@ -1,0 +1,14 @@
+{
+  "name": "react-cubism",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter demo dev",
+    "build": "pnpm --filter live2d-react build && pnpm --filter demo build",
+    "typecheck": "pnpm --recursive typecheck"
+  },
+  "engines": {
+    "node": ">=18",
+    "pnpm": ">=9"
+  }
+}
