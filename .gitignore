@@ -149,3 +149,6 @@ vite.config.ts.timestamp-*
 **/models/**
 !**/models/**/
 !**/models/**/.gitkeep
+packages/live2d-react/src/vendor/**
+!packages/live2d-react/src/vendor/
+!packages/live2d-react/src/vendor/.gitkeep
