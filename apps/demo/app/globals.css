@@ -167,6 +167,42 @@ button {
   padding-right: 2px;
 }
 
+.animation-section {
+  display: grid;
+  gap: 10px;
+}
+
+.pill-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pill-button {
+  min-height: 32px;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--foreground);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pill-button:hover {
+  background: var(--accent);
+}
+
+.pill-button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
 .model-button {
   display: grid;
   gap: 5px;
@@ -318,6 +354,12 @@ button {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.empty-copy.compact {
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 12px;
 }
 
 .sidebar-footer {
