@@ -280,9 +280,11 @@ button {
   outline-offset: 2px;
 }
 
-.model-button {
+.model-row {
   display: grid;
-  gap: 5px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
   width: 100%;
   min-height: 64px;
   padding: 12px 14px;
@@ -291,7 +293,6 @@ button {
   background: rgba(10, 21, 39, 0.45);
   color: var(--foreground);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
-  cursor: pointer;
   text-align: left;
   transition:
     transform 160ms ease,
@@ -299,6 +300,51 @@ button {
     background 160ms ease,
     border-color 160ms ease,
     color 160ms ease;
+}
+
+.model-select-button {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 2px 4px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.model-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.mini-toggle,
+.inline-action {
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--foreground);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.mini-toggle.active {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.inline-action {
+  min-height: 26px;
+}
+
+.inline-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
 .ghost-button {
@@ -408,18 +454,20 @@ button {
   font-size: 11px;
 }
 
-.model-button:hover {
+.model-row:hover {
   border-color: rgba(125, 211, 252, 0.22);
   background: rgba(125, 211, 252, 0.12);
   transform: translateY(-1px);
 }
 
-.model-button:focus-visible {
+.model-select-button:focus-visible,
+.mini-toggle:focus-visible,
+.inline-action:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
 }
 
-.model-button.selected {
+.model-row.selected {
   border-color: rgba(125, 211, 252, 0.3);
   background:
     linear-gradient(
@@ -447,8 +495,19 @@ button {
   font-size: 12px;
 }
 
-.model-button.selected .model-source {
+.model-row.selected .model-source {
   color: rgba(4, 17, 28, 0.72);
+}
+
+.model-row.selected .mini-toggle:not(.active) {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--primary-foreground);
+}
+
+.model-row.selected .mini-toggle.active {
+  border-color: rgba(250, 250, 250, 0.54);
+  background: var(--primary-foreground);
+  color: var(--primary);
 }
 
 .empty-copy {
@@ -535,8 +594,8 @@ button {
 .viewer-frame {
   display: grid;
   place-items: center;
-  min-height: 0;
   position: relative;
+  min-height: 0;
   margin-top: 20px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -570,6 +629,21 @@ button {
     rgba(5, 11, 20, 0.3) 100%
   );
   pointer-events: none;
+  z-index: 1;
+}
+
+.viewer-layer {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  z-index: 2;
+}
+
+.viewer-layer.hidden {
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
 }
 
 .viewer-frame canvas {

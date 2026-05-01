@@ -133,22 +133,49 @@ export function Live2DViewerClient({
     [modelUrl, models]
   );
   const [selectedUrl, setSelectedUrl] = useState(modelUrl);
-  const [parameters, setParameters] = useState<Live2DParameter[]>([]);
-  const [liveParameterValues, setLiveParameterValues] = useState<
-    Record<string, number>
+  const [loadedUrls, setLoadedUrls] = useState<Set<string>>(
+    () => new Set([modelUrl])
+  );
+  const [visibleUrls, setVisibleUrls] = useState<Set<string>>(
+    () => new Set([modelUrl])
+  );
+  const [parametersByUrl, setParametersByUrl] = useState<
+    Record<string, Live2DParameter[]>
   >({});
-  const [motions, setMotions] = useState<Live2DMotionOption[]>([]);
-  const [expressions, setExpressions] = useState<Live2DExpressionOption[]>([]);
-  const [motionRequest, setMotionRequest] =
-    useState<Live2DMotionRequest | null>(null);
-  const [expressionRequest, setExpressionRequest] =
-    useState<Live2DExpressionRequest | null>(null);
+  const [liveParameterValuesByUrl, setLiveParameterValuesByUrl] = useState<
+    Record<string, Record<string, number>>
+  >({});
+  const [motionsByUrl, setMotionsByUrl] = useState<
+    Record<string, Live2DMotionOption[]>
+  >({});
+  const [expressionsByUrl, setExpressionsByUrl] = useState<
+    Record<string, Live2DExpressionOption[]>
+  >({});
+  const [motionRequestByUrl, setMotionRequestByUrl] = useState<
+    Record<string, Live2DMotionRequest | null>
+  >({});
+  const [expressionRequestByUrl, setExpressionRequestByUrl] = useState<
+    Record<string, Live2DExpressionRequest | null>
+  >({});
   const [parameterFilter, setParameterFilter] = useState("");
   const [parameterUpdateFps, setParameterUpdateFps] = useState(10);
   const [resetVersion, setResetVersion] = useState(0);
-  const parameterValuesRef = useRef<Record<string, number>>({});
+  const parameterValuesRefs = useRef<
+    Record<string, React.MutableRefObject<Record<string, number>>>
+  >({});
   const selectedModel =
     options.find((model) => model.url === selectedUrl) ?? options[0];
+  const selectedParameterValuesRef =
+    parameterValuesRefs.current[selectedUrl] ??
+    ({ current: {} } as React.MutableRefObject<Record<string, number>>);
+  const parameters = parametersByUrl[selectedUrl] ?? [];
+  const liveParameterValues = liveParameterValuesByUrl[selectedUrl] ?? {};
+  const motions = motionsByUrl[selectedUrl] ?? [];
+  const expressions = expressionsByUrl[selectedUrl] ?? [];
+  const loadedModels = options.filter((model) => loadedUrls.has(model.url));
+  const visibleLoadedModels = loadedModels.filter((model) =>
+    visibleUrls.has(model.url)
+  );
   const modelCounts = options.reduce(
     (counts, model) => ({
       ...counts,
@@ -164,36 +191,107 @@ export function Live2DViewerClient({
       parameter.id.toLowerCase().includes(query)
     );
   }, [parameterFilter, parameters]);
-  const handleParametersLoaded = useCallback(
-    (loadedParameters: Live2DParameter[]) => {
-      setParameters(loadedParameters);
-      setLiveParameterValues(
-        Object.fromEntries(
-          loadedParameters.map((parameter) => [parameter.id, parameter.value])
-        )
+
+  useEffect(() => {
+    const validUrls = new Set(options.map((model) => model.url));
+    setLoadedUrls((current) => {
+      const next = new Set(
+        Array.from(current).filter((url) => validUrls.has(url))
       );
-      parameterValuesRef.current = {};
-      setParameterFilter("");
-      setResetVersion((current) => current + 1);
+      if (next.size === 0 && options[0]) next.add(options[0].url);
+      return next;
+    });
+    setVisibleUrls((current) => {
+      const next = new Set(
+        Array.from(current).filter((url) => validUrls.has(url))
+      );
+      if (next.size === 0 && options[0]) next.add(options[0].url);
+      return next;
+    });
+    if (!validUrls.has(selectedUrl) && options[0]) {
+      setSelectedUrl(options[0].url);
+    }
+  }, [options, selectedUrl]);
+
+  const getParameterValuesRef = (url: string) => {
+    parameterValuesRefs.current[url] ??= { current: {} };
+    return parameterValuesRefs.current[url];
+  };
+  const loadModel = (url: string, show = true) => {
+    setLoadedUrls((current) => new Set(current).add(url));
+    if (show) setVisibleUrls((current) => new Set(current).add(url));
+  };
+  const unloadModel = (url: string) => {
+    setLoadedUrls((current) => {
+      const next = new Set(current);
+      next.delete(url);
+      return next;
+    });
+    setVisibleUrls((current) => {
+      const next = new Set(current);
+      next.delete(url);
+      return next;
+    });
+  };
+  const toggleModelVisibility = (url: string) => {
+    loadModel(url, false);
+    setVisibleUrls((current) => {
+      const next = new Set(current);
+      if (next.has(url)) {
+        next.delete(url);
+      } else {
+        next.add(url);
+      }
+      return next;
+    });
+  };
+  const loadAllModels = () => {
+    const urls = options.map((model) => model.url);
+    setLoadedUrls(new Set(urls));
+    setVisibleUrls(new Set(urls));
+  };
+  const handleParametersLoaded = useCallback(
+    (url: string, loadedParameters: Live2DParameter[]) => {
+      setParametersByUrl((current) => ({
+        ...current,
+        [url]: loadedParameters,
+      }));
+      setLiveParameterValuesByUrl((current) => ({
+        ...current,
+        [url]: Object.fromEntries(
+          loadedParameters.map((parameter) => [parameter.id, parameter.value])
+        ),
+      }));
+      getParameterValuesRef(url).current = {};
+      if (url === selectedUrl) {
+        setParameterFilter("");
+        setResetVersion((current) => current + 1);
+      }
     },
-    []
+    [selectedUrl]
   );
   const resetAllParameters = () => {
-    parameterValuesRef.current = {};
+    getParameterValuesRef(selectedUrl).current = {};
     setResetVersion((current) => current + 1);
   };
   const requestMotion = (motion: Live2DMotionOption) => {
-    setMotionRequest({
-      group: motion.group,
-      index: motion.index,
-      nonce: Date.now(),
-    });
+    setMotionRequestByUrl((current) => ({
+      ...current,
+      [selectedUrl]: {
+        group: motion.group,
+        index: motion.index,
+        nonce: Date.now(),
+      },
+    }));
   };
   const requestExpression = (expression: Live2DExpressionOption) => {
-    setExpressionRequest({
-      index: expression.index,
-      nonce: Date.now(),
-    });
+    setExpressionRequestByUrl((current) => ({
+      ...current,
+      [selectedUrl]: {
+        index: expression.index,
+        nonce: Date.now(),
+      },
+    }));
   };
 
   return (
@@ -210,36 +308,61 @@ export function Live2DViewerClient({
         <div className="sidebar-section">
           <div className="section-heading">
             <span>Models</span>
-            <span className="muted">{options.length}</span>
+            <button
+              className="inline-action"
+              type="button"
+              onClick={loadAllModels}
+              disabled={options.length === 0}
+            >
+              Load all
+            </button>
           </div>
 
           <div className="model-list" role="listbox" aria-label="Model list">
             {options.map((model) => {
               const isSelected = model.url === selectedUrl;
+              const isLoaded = loadedUrls.has(model.url);
+              const isVisible = visibleUrls.has(model.url);
 
               return (
-                <button
+                <div
                   key={model.url}
-                  className={`model-button${isSelected ? " selected" : ""}`}
-                  type="button"
+                  className={`model-row${isSelected ? " selected" : ""}`}
                   role="option"
                   aria-selected={isSelected}
-                  onClick={() => {
-                    setSelectedUrl(model.url);
-                    setParameters([]);
-                    setLiveParameterValues({});
-                    setMotions([]);
-                    setExpressions([]);
-                    setMotionRequest(null);
-                    setExpressionRequest(null);
-                    parameterValuesRef.current = {};
-                  }}
                 >
-                  <span className="model-name">{model.label}</span>
-                  <span className="model-source">
-                    {model.source === "models" ? "Custom" : "SDK Sample"}
-                  </span>
-                </button>
+                  <button
+                    className="model-select-button"
+                    type="button"
+                    onClick={() => {
+                      setSelectedUrl(model.url);
+                      setParameterFilter("");
+                    }}
+                  >
+                    <span className="model-name">{model.label}</span>
+                    <span className="model-source">
+                      {model.source === "models" ? "Custom" : "SDK Sample"}
+                    </span>
+                  </button>
+                  <div className="model-actions">
+                    <button
+                      className={`mini-toggle${isLoaded ? " active" : ""}`}
+                      type="button"
+                      onClick={() =>
+                        isLoaded ? unloadModel(model.url) : loadModel(model.url)
+                      }
+                    >
+                      加载
+                    </button>
+                    <button
+                      className={`mini-toggle${isVisible ? " active" : ""}`}
+                      type="button"
+                      onClick={() => toggleModelVisibility(model.url)}
+                    >
+                      显示
+                    </button>
+                  </div>
+                </div>
               );
             })}
           </div>
@@ -267,30 +390,61 @@ export function Live2DViewerClient({
       <div className="stage">
         <header className="stage-toolbar">
           <div>
-            <p className="eyebrow">Selected Model</p>
+            <p className="eyebrow">Loaded Models</p>
             <h2>{selectedModel?.label ?? "No model found"}</h2>
           </div>
           <div className="model-path" title={selectedUrl}>
-            {selectedUrl}
+            {visibleLoadedModels.length}/{loadedModels.length} visible
           </div>
         </header>
 
         <div className="viewer-frame">
-          <Live2DViewerDynamic
-            key={selectedUrl}
-            modelUrl={selectedUrl}
-            width={width}
-            height={height}
-            fitToContainer
-            parameterValuesRef={parameterValuesRef}
-            motionRequest={motionRequest}
-            expressionRequest={expressionRequest}
-            parameterUpdateFps={parameterUpdateFps}
-            onParametersLoaded={handleParametersLoaded}
-            onParameterValuesChanged={setLiveParameterValues}
-            onMotionsLoaded={setMotions}
-            onExpressionsLoaded={setExpressions}
-          />
+          {loadedModels.map((model) => {
+            const isVisible = visibleUrls.has(model.url);
+
+            return (
+              <div
+                className={`viewer-layer${isVisible ? "" : " hidden"}`}
+                key={model.url}
+                aria-hidden={!isVisible}
+              >
+                <Live2DViewerDynamic
+                  modelUrl={model.url}
+                  width={width}
+                  height={height}
+                  fitToContainer
+                  parameterValuesRef={getParameterValuesRef(model.url)}
+                  motionRequest={motionRequestByUrl[model.url] ?? null}
+                  expressionRequest={expressionRequestByUrl[model.url] ?? null}
+                  parameterUpdateFps={parameterUpdateFps}
+                  onParametersLoaded={(loadedParameters) =>
+                    handleParametersLoaded(model.url, loadedParameters)
+                  }
+                  onParameterValuesChanged={(values) =>
+                    setLiveParameterValuesByUrl((current) => ({
+                      ...current,
+                      [model.url]: values,
+                    }))
+                  }
+                  onMotionsLoaded={(loadedMotions) =>
+                    setMotionsByUrl((current) => ({
+                      ...current,
+                      [model.url]: loadedMotions,
+                    }))
+                  }
+                  onExpressionsLoaded={(loadedExpressions) =>
+                    setExpressionsByUrl((current) => ({
+                      ...current,
+                      [model.url]: loadedExpressions,
+                    }))
+                  }
+                />
+              </div>
+            );
+          })}
+          {loadedModels.length === 0 ? (
+            <p className="empty-copy">Load a model to show it on the stage.</p>
+          ) : null}
         </div>
       </div>
 
@@ -386,7 +540,7 @@ export function Live2DViewerClient({
               key={parameter.id}
               parameter={parameter}
               liveValue={liveParameterValues[parameter.id]}
-              parameterValuesRef={parameterValuesRef}
+              parameterValuesRef={selectedParameterValuesRef}
               resetVersion={resetVersion}
             />
           ))}
