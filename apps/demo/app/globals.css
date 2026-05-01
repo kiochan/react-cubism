@@ -250,7 +250,8 @@ button {
   font-weight: 650;
 }
 
-.search-field input {
+.search-field input,
+.search-field select {
   width: 100%;
   min-height: 38px;
   padding: 0 11px;
@@ -262,7 +263,8 @@ button {
   font-weight: 500;
 }
 
-.search-field input:focus {
+.search-field input:focus,
+.search-field select:focus {
   border-color: var(--ring);
   outline: 2px solid rgba(161, 161, 170, 0.22);
 }
@@ -436,10 +438,8 @@ button {
 }
 
 .viewer-frame canvas {
-  max-width: min(100%, 520px);
-  max-height: calc(100vh - 150px);
-  width: auto;
-  height: auto;
+  max-width: 100%;
+  max-height: 100%;
 }
 
 @media (max-width: 840px) {
