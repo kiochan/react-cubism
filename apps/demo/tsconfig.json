@@ -9,7 +9,10 @@
     ],
     "noEmit": true,
     "allowJs": true,
-    "incremental": true
+    "incremental": true,
+    "strict": false,
+    "strictNullChecks": false,
+    "strictPropertyInitialization": false
   },
   "include": [
     "next-env.d.ts",
@@ -18,6 +21,7 @@
     ".next/types/**/*.ts"
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    "public/live2dcubism"
   ]
 }
