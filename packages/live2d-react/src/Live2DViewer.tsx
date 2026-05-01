@@ -1,6 +1,13 @@
 "use client";
 
-import { useEffect, useRef, type MutableRefObject } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type MutableRefObject,
+  type PointerEvent,
+  type WheelEvent,
+} from "react";
 import type {} from "./live2dcubismcore-types";
 
 export interface Live2DViewerProps {
@@ -8,10 +15,12 @@ export interface Live2DViewerProps {
   modelUrl: string;
   width?: number;
   height?: number;
+  fitToContainer?: boolean;
   parameterValues?: Record<string, number>;
   parameterValuesRef?: MutableRefObject<Record<string, number>>;
   motionRequest?: Live2DMotionRequest | null;
   expressionRequest?: Live2DExpressionRequest | null;
+  parameterUpdateFps?: number;
   onParametersLoaded?: (parameters: Live2DParameter[]) => void;
   onParameterValuesChanged?: (values: Record<string, number>) => void;
   onMotionsLoaded?: (motions: Live2DMotionOption[]) => void;
@@ -243,7 +252,8 @@ function createMvpMatrix(
   CubismModelMatrix: FrameworkModules["CubismModelMatrix"],
   model: { getCanvasWidth: () => number; getCanvasHeight: () => number },
   canvas: HTMLCanvasElement,
-  layout?: Record<string, number>
+  layout?: Record<string, number>,
+  view?: { panX: number; panY: number; zoom: number }
 ) {
   const modelMatrix = new CubismModelMatrix(
     model.getCanvasWidth(),
@@ -261,6 +271,10 @@ function createMvpMatrix(
   }
 
   projection.multiplyByMatrix(modelMatrix);
+  if (view) {
+    projection.translateRelative(view.panX, view.panY);
+    projection.scaleRelative(view.zoom, view.zoom);
+  }
   return projection;
 }
 
@@ -349,16 +363,21 @@ export function Live2DViewer({
   modelUrl,
   width = 400,
   height = 600,
+  fitToContainer = false,
   parameterValues = {},
   parameterValuesRef: externalParameterValuesRef,
   motionRequest,
   expressionRequest,
+  parameterUpdateFps = 10,
   onParametersLoaded,
   onParameterValuesChanged,
   onMotionsLoaded,
   onExpressionsLoaded,
 }: Live2DViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const [pixelRatio, setPixelRatio] = useState(1);
+  const [displaySize, setDisplaySize] = useState({ width, height });
   const internalParameterValuesRef = useRef(parameterValues);
   const parameterValuesRef =
     externalParameterValuesRef ?? internalParameterValuesRef;
@@ -368,6 +387,13 @@ export function Live2DViewer({
   const onExpressionsLoadedRef = useRef(onExpressionsLoaded);
   const motionRequestRef = useRef(motionRequest);
   const expressionRequestRef = useRef(expressionRequest);
+  const parameterUpdateFpsRef = useRef(parameterUpdateFps);
+  const viewTransformRef = useRef({ panX: 0, panY: 0, zoom: 1 });
+  const dragRef = useRef<{
+    pointerId: number;
+    lastX: number;
+    lastY: number;
+  } | null>(null);
 
   useEffect(() => {
     internalParameterValuesRef.current = parameterValues;
@@ -396,6 +422,80 @@ export function Live2DViewer({
   useEffect(() => {
     expressionRequestRef.current = expressionRequest;
   }, [expressionRequest]);
+
+  useEffect(() => {
+    parameterUpdateFpsRef.current = parameterUpdateFps;
+  }, [parameterUpdateFps]);
+
+  useEffect(() => {
+    setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  }, []);
+
+  useEffect(() => {
+    if (!fitToContainer) {
+      setDisplaySize({ width, height });
+      return;
+    }
+
+    const wrapper = wrapperRef.current;
+    if (!wrapper) return;
+
+    const updateSize = () => {
+      const rect = wrapper.getBoundingClientRect();
+      setDisplaySize({
+        width: Math.max(1, Math.floor(rect.width)),
+        height: Math.max(1, Math.floor(rect.height)),
+      });
+    };
+
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(wrapper);
+
+    return () => observer.disconnect();
+  }, [fitToContainer, height, width]);
+
+  const handlePointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = {
+      pointerId: event.pointerId,
+      lastX: event.clientX,
+      lastY: event.clientY,
+    };
+  };
+
+  const handlePointerMove = (event: PointerEvent<HTMLCanvasElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+
+    const canvas = event.currentTarget;
+    const rect = canvas.getBoundingClientRect();
+    const dx = event.clientX - drag.lastX;
+    const dy = event.clientY - drag.lastY;
+    drag.lastX = event.clientX;
+    drag.lastY = event.clientY;
+
+    viewTransformRef.current.panX += (dx / rect.width) * 2;
+    viewTransformRef.current.panY -= (dy / rect.height) * 2;
+  };
+
+  const handlePointerUp = (event: PointerEvent<HTMLCanvasElement>) => {
+    if (dragRef.current?.pointerId === event.pointerId) {
+      dragRef.current = null;
+    }
+  };
+
+  const handleWheel = (event: WheelEvent<HTMLCanvasElement>) => {
+    event.preventDefault();
+    const zoomFactor = Math.exp(-event.deltaY * 0.001);
+    const nextZoom = viewTransformRef.current.zoom * zoomFactor;
+
+    viewTransformRef.current.zoom = Math.min(4, Math.max(0.35, nextZoom));
+  };
+
+  const resetViewTransform = () => {
+    viewTransformRef.current = { panX: 0, panY: 0, zoom: 1 };
+  };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -665,7 +765,8 @@ export function Live2DViewer({
           CubismModelMatrix,
           cubismModel,
           canvasElement,
-          settings.Layout
+          settings.Layout,
+          viewTransformRef.current
         )
       );
       textures.forEach((texture, index) => renderer?.bindTexture(index, texture));
@@ -708,7 +809,11 @@ export function Live2DViewer({
 
           cubismModel.setParameterValueByIndex(index, value, 1);
         });
-        if (now - lastParameterReportTime > 100) {
+        const parameterReportInterval =
+          parameterUpdateFpsRef.current <= 0
+            ? 0
+            : 1000 / parameterUpdateFpsRef.current;
+        if (now - lastParameterReportTime >= parameterReportInterval) {
           lastParameterReportTime = now;
           onParameterValuesChangedRef.current?.(
             Object.fromEntries(
@@ -730,7 +835,8 @@ export function Live2DViewer({
             CubismModelMatrix,
             cubismModel,
             canvasElement,
-            settings.Layout
+            settings.Layout,
+            viewTransformRef.current
           )
         );
         renderer.drawModel(CUBISM_SHADER_DIR);
@@ -754,14 +860,36 @@ export function Live2DViewer({
       if (cubismMoc && cubismModel) cubismMoc.deleteModel(cubismModel);
       cubismMoc?.release();
     };
-  }, [modelUrl]);
+  }, [displaySize.height, displaySize.width, modelUrl, pixelRatio]);
 
   return (
-    <canvas
-      ref={canvasRef}
-      width={width}
-      height={height}
-      style={{ display: "block" }}
-    />
+    <div
+      ref={wrapperRef}
+      style={{
+        display: "grid",
+        height: fitToContainer ? "100%" : displaySize.height,
+        placeItems: "center",
+        width: fitToContainer ? "100%" : displaySize.width,
+      }}
+    >
+      <canvas
+        ref={canvasRef}
+        width={Math.round(displaySize.width * pixelRatio)}
+        height={Math.round(displaySize.height * pixelRatio)}
+        onDoubleClick={resetViewTransform}
+        onPointerCancel={handlePointerUp}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onWheel={handleWheel}
+        style={{
+          cursor: dragRef.current ? "grabbing" : "grab",
+          display: "block",
+          height: displaySize.height,
+          touchAction: "none",
+          width: displaySize.width,
+        }}
+      />
+    </div>
   );
 }

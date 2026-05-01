@@ -37,6 +37,14 @@ interface Props {
   height?: number;
 }
 
+const PARAMETER_UPDATE_RATES = [
+  { label: "Realtime", value: 0 },
+  { label: "30 FPS", value: 30 },
+  { label: "10 FPS", value: 10 },
+  { label: "4 FPS", value: 4 },
+  { label: "1 FPS", value: 1 },
+];
+
 interface ParameterControlProps {
   parameter: Live2DParameter;
   liveValue?: number;
@@ -136,6 +144,7 @@ export function Live2DViewerClient({
   const [expressionRequest, setExpressionRequest] =
     useState<Live2DExpressionRequest | null>(null);
   const [parameterFilter, setParameterFilter] = useState("");
+  const [parameterUpdateFps, setParameterUpdateFps] = useState(10);
   const [resetVersion, setResetVersion] = useState(0);
   const parameterValuesRef = useRef<Record<string, number>>({});
   const selectedModel =
@@ -272,9 +281,11 @@ export function Live2DViewerClient({
             modelUrl={selectedUrl}
             width={width}
             height={height}
+            fitToContainer
             parameterValuesRef={parameterValuesRef}
             motionRequest={motionRequest}
             expressionRequest={expressionRequest}
+            parameterUpdateFps={parameterUpdateFps}
             onParametersLoaded={handleParametersLoaded}
             onParameterValuesChanged={setLiveParameterValues}
             onMotionsLoaded={setMotions}
@@ -307,6 +318,22 @@ export function Live2DViewerClient({
             placeholder="ParamAngle, Eye, Mouth..."
             type="search"
           />
+        </label>
+
+        <label className="search-field">
+          <span>Update rate</span>
+          <select
+            value={parameterUpdateFps}
+            onChange={(event) =>
+              setParameterUpdateFps(Number(event.target.value))
+            }
+          >
+            {PARAMETER_UPDATE_RATES.map((rate) => (
+              <option key={rate.value} value={rate.value}>
+                {rate.label}
+              </option>
+            ))}
+          </select>
         </label>
 
         <div className="animation-section">
