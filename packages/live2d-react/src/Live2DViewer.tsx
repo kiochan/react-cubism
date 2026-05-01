@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type MutableRefObject } from "react";
 import type {} from "./live2dcubismcore-types";
 
 export interface Live2DViewerProps {
@@ -8,6 +8,17 @@ export interface Live2DViewerProps {
   modelUrl: string;
   width?: number;
   height?: number;
+  parameterValues?: Record<string, number>;
+  parameterValuesRef?: MutableRefObject<Record<string, number>>;
+  onParametersLoaded?: (parameters: Live2DParameter[]) => void;
+}
+
+export interface Live2DParameter {
+  id: string;
+  minimumValue: number;
+  maximumValue: number;
+  defaultValue: number;
+  value: number;
 }
 
 const CUBISM_CORE_SCRIPT_SRC = "/live2dcubism/Core/live2dcubismcore.min.js";
@@ -162,6 +173,20 @@ function createMvpMatrix(
   return projection;
 }
 
+function getLive2DParameters(model: {
+  getModel: () => Live2DCubismCore.Model;
+}): Live2DParameter[] {
+  const parameters = model.getModel().parameters;
+
+  return Array.from({ length: parameters.count }, (_, index) => ({
+    id: parameters.ids[index],
+    minimumValue: parameters.minimumValues[index],
+    maximumValue: parameters.maximumValues[index],
+    defaultValue: parameters.defaultValues[index],
+    value: parameters.values[index],
+  }));
+}
+
 /**
  * Renders a Live2D Cubism 5 model on a WebGL canvas.
  *
@@ -174,8 +199,23 @@ export function Live2DViewer({
   modelUrl,
   width = 400,
   height = 600,
+  parameterValues = {},
+  parameterValuesRef: externalParameterValuesRef,
+  onParametersLoaded,
 }: Live2DViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const internalParameterValuesRef = useRef(parameterValues);
+  const parameterValuesRef =
+    externalParameterValuesRef ?? internalParameterValuesRef;
+  const onParametersLoadedRef = useRef(onParametersLoaded);
+
+  useEffect(() => {
+    internalParameterValuesRef.current = parameterValues;
+  }, [internalParameterValuesRef, parameterValues]);
+
+  useEffect(() => {
+    onParametersLoadedRef.current = onParametersLoaded;
+  }, [onParametersLoaded]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -188,6 +228,7 @@ export function Live2DViewer({
     let glContext: WebGL2RenderingContext | null = null;
     let renderer: { initialize: (model: any) => void; startUp: (gl: WebGL2RenderingContext) => void; setIsPremultipliedAlpha: (enabled: boolean) => void; setMvpMatrix: (matrix: any) => void; bindTexture: (index: number, texture: WebGLTexture) => void; drawModel: (shaderPath?: string) => void; release: () => void } | null = null;
     let textures: WebGLTexture[] = [];
+    const parameterIndices = new Map<string, number>();
 
     (async () => {
       try {
@@ -249,6 +290,10 @@ export function Live2DViewer({
         return;
       }
       if (stopped || !cubismMoc || !cubismModel) return;
+      getLive2DParameters(cubismModel).forEach((parameter, index) => {
+        parameterIndices.set(parameter.id, index);
+      });
+      onParametersLoadedRef.current?.(getLive2DParameters(cubismModel));
 
       const gl = canvas.getContext("webgl2", {
         premultipliedAlpha: true,
@@ -294,6 +339,12 @@ export function Live2DViewer({
       function tick() {
         if (stopped || !cubismModel || !renderer) return;
 
+        Object.entries(parameterValuesRef.current).forEach(([id, value]) => {
+          const index = parameterIndices.get(id);
+          if (index === undefined) return;
+
+          cubismModel.setParameterValueByIndex(index, value, 1);
+        });
         glContext.viewport(0, 0, canvasElement.width, canvasElement.height);
         glContext.clearColor(0, 0, 0, 0);
         glContext.clear(glContext.COLOR_BUFFER_BIT);
