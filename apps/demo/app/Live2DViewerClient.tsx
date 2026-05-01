@@ -9,7 +9,13 @@ import {
   useRef,
   useState,
 } from "react";
-import type { Live2DParameter } from "live2d-react";
+import type {
+  Live2DExpressionOption,
+  Live2DExpressionRequest,
+  Live2DMotionOption,
+  Live2DMotionRequest,
+  Live2DParameter,
+} from "live2d-react";
 
 // Dynamically import the viewer with SSR disabled because Live2DViewer requires
 // browser APIs (WebGL, fetch) that are not available on the server.
@@ -33,27 +39,42 @@ interface Props {
 
 interface ParameterControlProps {
   parameter: Live2DParameter;
+  liveValue?: number;
   parameterValuesRef: React.MutableRefObject<Record<string, number>>;
   resetVersion: number;
 }
 
 const ParameterControl = memo(function ParameterControl({
   parameter,
+  liveValue,
   parameterValuesRef,
   resetVersion,
 }: ParameterControlProps) {
   const [value, setValue] = useState(parameter.defaultValue);
+  const [isOverridden, setIsOverridden] = useState(false);
   const step =
     parameter.maximumValue - parameter.minimumValue <= 2 ? 0.01 : 0.1;
 
   useEffect(() => {
-    parameterValuesRef.current[parameter.id] = parameter.defaultValue;
     setValue(parameter.defaultValue);
+    setIsOverridden(false);
   }, [parameter, parameterValuesRef, resetVersion]);
+
+  useEffect(() => {
+    if (isOverridden || liveValue === undefined) return;
+
+    setValue(liveValue);
+  }, [isOverridden, liveValue]);
 
   const updateValue = (nextValue: number) => {
     parameterValuesRef.current[parameter.id] = nextValue;
+    setIsOverridden(true);
     setValue(nextValue);
+  };
+  const resetValue = () => {
+    delete parameterValuesRef.current[parameter.id];
+    setIsOverridden(false);
+    setValue(liveValue ?? parameter.defaultValue);
   };
 
   return (
@@ -63,11 +84,14 @@ const ParameterControl = memo(function ParameterControl({
           className="parameter-id"
           type="button"
           title="Reset parameter"
-          onClick={() => updateValue(parameter.defaultValue)}
+          onClick={resetValue}
         >
           {parameter.id}
         </button>
-        <output>{value.toFixed(2)}</output>
+        <output>
+          {isOverridden ? "Override " : "Live "}
+          {value.toFixed(2)}
+        </output>
       </div>
       <input
         aria-label={parameter.id}
@@ -102,6 +126,15 @@ export function Live2DViewerClient({
   );
   const [selectedUrl, setSelectedUrl] = useState(modelUrl);
   const [parameters, setParameters] = useState<Live2DParameter[]>([]);
+  const [liveParameterValues, setLiveParameterValues] = useState<
+    Record<string, number>
+  >({});
+  const [motions, setMotions] = useState<Live2DMotionOption[]>([]);
+  const [expressions, setExpressions] = useState<Live2DExpressionOption[]>([]);
+  const [motionRequest, setMotionRequest] =
+    useState<Live2DMotionRequest | null>(null);
+  const [expressionRequest, setExpressionRequest] =
+    useState<Live2DExpressionRequest | null>(null);
   const [parameterFilter, setParameterFilter] = useState("");
   const [resetVersion, setResetVersion] = useState(0);
   const parameterValuesRef = useRef<Record<string, number>>({});
@@ -125,22 +158,33 @@ export function Live2DViewerClient({
   const handleParametersLoaded = useCallback(
     (loadedParameters: Live2DParameter[]) => {
       setParameters(loadedParameters);
-      parameterValuesRef.current = Object.fromEntries(
-        loadedParameters.map((parameter) => [
-          parameter.id,
-          parameter.defaultValue,
-        ])
+      setLiveParameterValues(
+        Object.fromEntries(
+          loadedParameters.map((parameter) => [parameter.id, parameter.value])
+        )
       );
+      parameterValuesRef.current = {};
       setParameterFilter("");
       setResetVersion((current) => current + 1);
     },
     []
   );
   const resetAllParameters = () => {
-    parameterValuesRef.current = Object.fromEntries(
-      parameters.map((parameter) => [parameter.id, parameter.defaultValue])
-    );
+    parameterValuesRef.current = {};
     setResetVersion((current) => current + 1);
+  };
+  const requestMotion = (motion: Live2DMotionOption) => {
+    setMotionRequest({
+      group: motion.group,
+      index: motion.index,
+      nonce: Date.now(),
+    });
+  };
+  const requestExpression = (expression: Live2DExpressionOption) => {
+    setExpressionRequest({
+      index: expression.index,
+      nonce: Date.now(),
+    });
   };
 
   return (
@@ -174,6 +218,11 @@ export function Live2DViewerClient({
                   onClick={() => {
                     setSelectedUrl(model.url);
                     setParameters([]);
+                    setLiveParameterValues({});
+                    setMotions([]);
+                    setExpressions([]);
+                    setMotionRequest(null);
+                    setExpressionRequest(null);
                     parameterValuesRef.current = {};
                   }}
                 >
@@ -224,7 +273,12 @@ export function Live2DViewerClient({
             width={width}
             height={height}
             parameterValuesRef={parameterValuesRef}
+            motionRequest={motionRequest}
+            expressionRequest={expressionRequest}
             onParametersLoaded={handleParametersLoaded}
+            onParameterValuesChanged={setLiveParameterValues}
+            onMotionsLoaded={setMotions}
+            onExpressionsLoaded={setExpressions}
           />
         </div>
       </div>
@@ -255,11 +309,56 @@ export function Live2DViewerClient({
           />
         </label>
 
+        <div className="animation-section">
+          <div className="section-heading">
+            <span>Motions</span>
+            <span className="muted">{motions.length}</span>
+          </div>
+          <div className="pill-list">
+            {motions.map((motion) => (
+              <button
+                className="pill-button"
+                key={`${motion.group}:${motion.index}`}
+                onClick={() => requestMotion(motion)}
+                type="button"
+              >
+                {motion.name}
+              </button>
+            ))}
+            {motions.length === 0 ? (
+              <p className="empty-copy compact">No motions found.</p>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="animation-section">
+          <div className="section-heading">
+            <span>Expressions</span>
+            <span className="muted">{expressions.length}</span>
+          </div>
+          <div className="pill-list">
+            {expressions.map((expression) => (
+              <button
+                className="pill-button"
+                key={expression.index}
+                onClick={() => requestExpression(expression)}
+                type="button"
+              >
+                {expression.name}
+              </button>
+            ))}
+            {expressions.length === 0 ? (
+              <p className="empty-copy compact">No expressions found.</p>
+            ) : null}
+          </div>
+        </div>
+
         <div className="parameter-list" aria-label="Live2D parameters">
           {filteredParameters.map((parameter) => (
             <ParameterControl
               key={parameter.id}
               parameter={parameter}
+              liveValue={liveParameterValues[parameter.id]}
               parameterValuesRef={parameterValuesRef}
               resetVersion={resetVersion}
             />
