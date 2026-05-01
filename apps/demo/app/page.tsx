@@ -69,21 +69,12 @@ export default function HomePage() {
   const defaultModelUrl = models[0]?.url ?? "/models/ren/ren.model3.json";
 
   return (
-    <main style={{ padding: "2rem", fontFamily: "sans-serif" }}>
-      <h1>Live2D Cubism 5 Demo</h1>
-      <p>
-        Select a model from <code>apps/demo/public/models/</code> or{" "}
-        <code>apps/demo/public/live2dcubism/Samples/Resources/</code>.
-      </p>
-      <p>
-        See <strong>README.md</strong> for instructions on adding the Cubism 5
-        SDK core file.
-      </p>
+    <main className="app-shell">
       <Live2DViewerClient
         modelUrl={defaultModelUrl}
         models={models}
-        width={400}
-        height={600}
+        width={520}
+        height={760}
       />
     </main>
   );
