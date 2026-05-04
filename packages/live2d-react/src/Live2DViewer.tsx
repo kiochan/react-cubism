@@ -16,6 +16,8 @@ export interface Live2DViewerProps {
   width?: number;
   height?: number;
   fitToContainer?: boolean;
+  viewTransform?: Live2DViewTransform;
+  viewTransformRef?: MutableRefObject<Live2DViewTransform>;
   parameterValues?: Record<string, number>;
   parameterValuesRef?: MutableRefObject<Record<string, number>>;
   motionRequest?: Live2DMotionRequest | null;
@@ -23,12 +25,20 @@ export interface Live2DViewerProps {
   parameterUpdateFps?: number;
   onParametersLoaded?: (parameters: Live2DParameter[]) => void;
   onParameterValuesChanged?: (values: Record<string, number>) => void;
+  onViewTransformChanged?: (transform: Live2DViewTransform) => void;
   onMotionsLoaded?: (motions: Live2DMotionOption[]) => void;
   onExpressionsLoaded?: (expressions: Live2DExpressionOption[]) => void;
 }
 
+export interface Live2DViewTransform {
+  panX: number;
+  panY: number;
+  zoom: number;
+}
+
 export interface Live2DParameter {
   id: string;
+  name?: string;
   minimumValue: number;
   maximumValue: number;
   defaultValue: number;
@@ -68,6 +78,7 @@ interface ModelSettings {
     Textures?: string[];
     Physics?: string;
     Pose?: string;
+    DisplayInfo?: string;
     Expressions?: Array<{
       Name?: string;
       File?: string;
@@ -87,6 +98,13 @@ interface ModelSettings {
     Ids?: string[];
   }>;
   Layout?: Record<string, number>;
+}
+
+interface DisplayInfo {
+  Parameters?: Array<{
+    Id?: string;
+    Name?: string;
+  }>;
 }
 
 interface FrameworkModules {
@@ -278,13 +296,17 @@ function createMvpMatrix(
   return projection;
 }
 
-function getLive2DParameters(model: {
-  getModel: () => Live2DCubismCore.Model;
-}): Live2DParameter[] {
+function getLive2DParameters(
+  model: {
+    getModel: () => Live2DCubismCore.Model;
+  },
+  parameterNames?: Map<string, string>
+): Live2DParameter[] {
   const parameters = model.getModel().parameters;
 
   return Array.from({ length: parameters.count }, (_, index) => ({
     id: parameters.ids[index],
+    name: parameterNames?.get(parameters.ids[index]),
     minimumValue: parameters.minimumValues[index],
     maximumValue: parameters.maximumValues[index],
     defaultValue: parameters.defaultValues[index],
@@ -364,6 +386,8 @@ export function Live2DViewer({
   width = 400,
   height = 600,
   fitToContainer = false,
+  viewTransform,
+  viewTransformRef: externalViewTransformRef,
   parameterValues = {},
   parameterValuesRef: externalParameterValuesRef,
   motionRequest,
@@ -371,6 +395,7 @@ export function Live2DViewer({
   parameterUpdateFps = 10,
   onParametersLoaded,
   onParameterValuesChanged,
+  onViewTransformChanged,
   onMotionsLoaded,
   onExpressionsLoaded,
 }: Live2DViewerProps) {
@@ -383,12 +408,17 @@ export function Live2DViewer({
     externalParameterValuesRef ?? internalParameterValuesRef;
   const onParametersLoadedRef = useRef(onParametersLoaded);
   const onParameterValuesChangedRef = useRef(onParameterValuesChanged);
+  const onViewTransformChangedRef = useRef(onViewTransformChanged);
   const onMotionsLoadedRef = useRef(onMotionsLoaded);
   const onExpressionsLoadedRef = useRef(onExpressionsLoaded);
   const motionRequestRef = useRef(motionRequest);
   const expressionRequestRef = useRef(expressionRequest);
   const parameterUpdateFpsRef = useRef(parameterUpdateFps);
-  const viewTransformRef = useRef({ panX: 0, panY: 0, zoom: 1 });
+  const internalViewTransformRef = useRef<Live2DViewTransform>(
+    viewTransform ?? { panX: 0, panY: 0, zoom: 1 }
+  );
+  const viewTransformRef =
+    externalViewTransformRef ?? internalViewTransformRef;
   const dragRef = useRef<{
     pointerId: number;
     lastX: number;
@@ -400,12 +430,22 @@ export function Live2DViewer({
   }, [internalParameterValuesRef, parameterValues]);
 
   useEffect(() => {
+    if (!viewTransform) return;
+
+    viewTransformRef.current = viewTransform;
+  }, [viewTransform, viewTransformRef]);
+
+  useEffect(() => {
     onParametersLoadedRef.current = onParametersLoaded;
   }, [onParametersLoaded]);
 
   useEffect(() => {
     onParameterValuesChangedRef.current = onParameterValuesChanged;
   }, [onParameterValuesChanged]);
+
+  useEffect(() => {
+    onViewTransformChangedRef.current = onViewTransformChanged;
+  }, [onViewTransformChanged]);
 
   useEffect(() => {
     onMotionsLoadedRef.current = onMotionsLoaded;
@@ -475,8 +515,12 @@ export function Live2DViewer({
     drag.lastX = event.clientX;
     drag.lastY = event.clientY;
 
-    viewTransformRef.current.panX += (dx / rect.width) * 2;
-    viewTransformRef.current.panY -= (dy / rect.height) * 2;
+    viewTransformRef.current = {
+      ...viewTransformRef.current,
+      panX: viewTransformRef.current.panX + (dx / rect.width) * 2,
+      panY: viewTransformRef.current.panY - (dy / rect.height) * 2,
+    };
+    onViewTransformChangedRef.current?.(viewTransformRef.current);
   };
 
   const handlePointerUp = (event: PointerEvent<HTMLCanvasElement>) => {
@@ -490,11 +534,16 @@ export function Live2DViewer({
     const zoomFactor = Math.exp(-event.deltaY * 0.001);
     const nextZoom = viewTransformRef.current.zoom * zoomFactor;
 
-    viewTransformRef.current.zoom = Math.min(4, Math.max(0.35, nextZoom));
+    viewTransformRef.current = {
+      ...viewTransformRef.current,
+      zoom: Math.min(4, Math.max(0.35, nextZoom)),
+    };
+    onViewTransformChangedRef.current?.(viewTransformRef.current);
   };
 
   const resetViewTransform = () => {
     viewTransformRef.current = { panX: 0, panY: 0, zoom: 1 };
+    onViewTransformChangedRef.current?.(viewTransformRef.current);
   };
 
   useEffect(() => {
@@ -579,6 +628,26 @@ export function Live2DViewer({
       }
       if (stopped) return;
 
+      const parameterNames = new Map<string, string>();
+      const displayInfoUrl = resolveResource(
+        base,
+        settings.FileReferences?.DisplayInfo
+      );
+      if (displayInfoUrl) {
+        try {
+          const res = await fetch(displayInfoUrl);
+          if (!res.ok) throw new Error(`HTTP ${res.status}: ${displayInfoUrl}`);
+          const displayInfo = (await res.json()) as DisplayInfo;
+          displayInfo.Parameters?.forEach((parameter) => {
+            if (!parameter.Id || !parameter.Name) return;
+
+            parameterNames.set(parameter.Id, parameter.Name);
+          });
+        } catch (e) {
+          console.error("[Live2DViewer] Failed to load display info:", e);
+        }
+      }
+
       const mocPath = settings.FileReferences?.Moc;
       if (!mocPath) {
         console.error("[Live2DViewer] Model settings is missing the Moc path.");
@@ -596,10 +665,14 @@ export function Live2DViewer({
         return;
       }
       if (stopped || !cubismMoc || !cubismModel) return;
-      getLive2DParameters(cubismModel).forEach((parameter, index) => {
-        parameterIndices.set(parameter.id, index);
-      });
-      onParametersLoadedRef.current?.(getLive2DParameters(cubismModel));
+      getLive2DParameters(cubismModel, parameterNames).forEach(
+        (parameter, index) => {
+          parameterIndices.set(parameter.id, index);
+        }
+      );
+      onParametersLoadedRef.current?.(
+        getLive2DParameters(cubismModel, parameterNames)
+      );
       motionManager = new CubismMotionManager();
       expressionManager = new CubismExpressionMotionManager();
       breath = createBreath(modules, cubismModel);
@@ -817,10 +890,9 @@ export function Live2DViewer({
           lastParameterReportTime = now;
           onParameterValuesChangedRef.current?.(
             Object.fromEntries(
-              getLive2DParameters(cubismModel).map((parameter) => [
-                parameter.id,
-                parameter.value,
-              ])
+              getLive2DParameters(cubismModel, parameterNames).map(
+                (parameter) => [parameter.id, parameter.value]
+              )
             )
           );
         }
