@@ -6,4 +6,5 @@ export type {
   Live2DMotionRequest,
   Live2DParameter,
   Live2DViewerProps,
+  Live2DViewTransform,
 } from "./Live2DViewer";
