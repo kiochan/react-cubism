@@ -15,7 +15,7 @@ services:
       HOSTNAME: 0.0.0.0
       PORT: "3000"
     ports:
-      - "127.0.0.1:4091:3000"
+      - "127.0.0.1:4092:3000"
     volumes:
       - /opt/react-cubism/live2dcubism:/app/apps/demo/public/live2dcubism:ro
       - /opt/react-cubism/models:/app/apps/demo/public/models:ro
