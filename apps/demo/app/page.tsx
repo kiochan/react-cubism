@@ -10,6 +10,7 @@ export const dynamic = "force-dynamic";
 function getModelOptions(): ModelOption[] {
   const publicDirCandidates = [
     join(process.cwd(), "public"),
+    join(process.cwd(), "apps", "demo", ".next", "standalone", "public"),
     join(process.cwd(), "apps", "demo", "public"),
   ];
   const publicDir =

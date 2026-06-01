@@ -38,11 +38,11 @@ RUN addgroup --system --gid 1001 nodejs \
   && adduser --system --uid 1001 nextjs
 
 COPY --from=builder --chown=nextjs:nodejs /app/apps/demo/.next/standalone ./
-COPY --from=builder --chown=nextjs:nodejs /app/apps/demo/.next/static ./apps/demo/.next/static
-COPY --from=builder --chown=nextjs:nodejs /app/apps/demo/public ./apps/demo/public
+COPY --from=builder --chown=nextjs:nodejs /app/apps/demo/.next/static ./.next/static
+COPY --from=builder --chown=nextjs:nodejs /app/apps/demo/public ./public
 
 USER nextjs
 
 EXPOSE 3000
 
-CMD ["node", "apps/demo/server.js"]
+CMD ["node", "server.js"]
