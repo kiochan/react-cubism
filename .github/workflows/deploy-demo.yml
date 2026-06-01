@@ -74,7 +74,7 @@ jobs:
             --exclude='apps/demo/.next' \
             --exclude='packages/live2d-react/dist' \
             --exclude='CubismSdkForWeb-5-r.5' \
-            -czf react-cubism.tar.gz .
+            -czf /tmp/react-cubism.tar.gz .
 
       - name: Upload deployment package
         env:
@@ -82,7 +82,7 @@ jobs:
           DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
         run: |
-          scp -P "$DEPLOY_PORT" react-cubism.tar.gz \
+          scp -P "$DEPLOY_PORT" /tmp/react-cubism.tar.gz \
             "$DEPLOY_USER@$DEPLOY_HOST:/tmp/react-cubism.tar.gz"
 
       - name: Deploy on server
