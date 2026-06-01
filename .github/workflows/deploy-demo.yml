@@ -1,0 +1,102 @@
+name: Deploy demo
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SERVER_APP_DIR: /home/deploy/react-cubism
+  SERVER_SDK_VENDOR_DIR: /opt/react-cubism/build-sdk/vendor
+
+jobs:
+  deploy:
+    environment:
+      name: demo
+      url: ${{ vars.NEXT_PUBLIC_SITE_URL }}
+    runs-on: ubuntu-latest
+    env:
+      NEXT_PUBLIC_SITE_URL: ${{ vars.NEXT_PUBLIC_SITE_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "$DEPLOY_PORT" "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Restore Cubism SDK vendor
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          mkdir -p packages/live2d-react/src/vendor
+          scp -P "$DEPLOY_PORT" -r \
+            "$DEPLOY_USER@$DEPLOY_HOST:$SERVER_SDK_VENDOR_DIR/." \
+            packages/live2d-react/src/vendor/
+          test -f packages/live2d-react/src/vendor/live2dcubismcore.d.ts
+          test -f packages/live2d-react/src/vendor/cubism-framework/live2dcubismframework.ts
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Package deployment
+        run: |
+          tar \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='apps/demo/.next' \
+            --exclude='packages/live2d-react/dist' \
+            --exclude='CubismSdkForWeb-5-r.5' \
+            -czf react-cubism.tar.gz .
+
+      - name: Upload deployment package
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          scp -P "$DEPLOY_PORT" react-cubism.tar.gz \
+            "$DEPLOY_USER@$DEPLOY_HOST:/tmp/react-cubism.tar.gz"
+
+      - name: Deploy on server
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          NEXT_PUBLIC_SITE_URL: ${{ vars.NEXT_PUBLIC_SITE_URL }}
+        run: |
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "
+            set -e
+            rm -rf '$SERVER_APP_DIR'
+            mkdir -p '$SERVER_APP_DIR'
+            tar -xzf /tmp/react-cubism.tar.gz -C '$SERVER_APP_DIR'
+            cd '$SERVER_APP_DIR'
+            NEXT_PUBLIC_SITE_URL='$NEXT_PUBLIC_SITE_URL' docker compose up -d --build
+          "

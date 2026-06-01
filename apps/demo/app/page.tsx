@@ -5,6 +5,8 @@ import {
   type ModelOption,
 } from "./Live2DViewerClient";
 
+export const dynamic = "force-dynamic";
+
 function getModelOptions(): ModelOption[] {
   const publicDirCandidates = [
     join(process.cwd(), "public"),

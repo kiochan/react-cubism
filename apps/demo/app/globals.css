@@ -16,6 +16,8 @@
   --ring: rgba(101, 214, 173, 0.46);
   --shadow: 0 22px 54px rgba(0, 0, 0, 0.38);
   --radius: 18px;
+  --font-display: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
   font-family: var(--font-display), "Segoe UI", sans-serif;
 }
 

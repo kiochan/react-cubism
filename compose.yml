@@ -1,0 +1,21 @@
+services:
+  demo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-}
+    image: react-cubism-demo:latest
+    container_name: react-cubism-demo
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-}
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+    ports:
+      - "127.0.0.1:4091:3000"
+    volumes:
+      - /opt/react-cubism/live2dcubism:/app/apps/demo/public/live2dcubism:ro
+      - /opt/react-cubism/models:/app/apps/demo/public/models:ro
