@@ -331,9 +331,9 @@ button {
   gap: 10px;
 }
 
-.range-field {
+.range-field,
+.number-field {
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) 54px;
   align-items: center;
   gap: 10px;
   color: var(--foreground);
@@ -341,9 +341,32 @@ button {
   font-weight: 700;
 }
 
+.range-field {
+  grid-template-columns: 44px minmax(0, 1fr) 54px;
+}
+
+.number-field {
+  grid-template-columns: 44px minmax(0, 1fr);
+}
+
 .range-field input {
   width: 100%;
   accent-color: var(--primary);
+}
+
+.number-field input,
+.number-input {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(19, 23, 21, 0.82);
+  color: var(--foreground);
+  font-family: var(--font-mono), Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
 }
 
 .range-field output {
@@ -723,6 +746,19 @@ button {
   accent-color: var(--primary);
 }
 
+.parameter-value-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px;
+  align-items: center;
+  gap: 10px;
+}
+
+.number-field input:focus,
+.number-input:focus {
+  border-color: var(--ring);
+  outline: 2px solid rgba(101, 214, 173, 0.16);
+}
+
 .parameter-range {
   color: var(--muted);
   font-family: var(--font-mono), Consolas, monospace;
@@ -964,6 +1000,10 @@ button {
 
   .range-field {
     grid-template-columns: 38px minmax(0, 1fr) 54px;
+  }
+
+  .number-field {
+    grid-template-columns: 38px minmax(0, 1fr);
   }
 
   .stage {

@@ -262,9 +262,12 @@ function clampParameterValue(value: number, parameter?: Live2DParameter) {
 
 function clampViewTransform(transform: Live2DViewTransform) {
   return {
-    panX: Math.min(2, Math.max(-2, transform.panX)),
-    panY: Math.min(2, Math.max(-2, transform.panY)),
-    zoom: Math.min(4, Math.max(0.35, transform.zoom)),
+    panX: Number.isFinite(transform.panX) ? transform.panX : 0,
+    panY: Number.isFinite(transform.panY) ? transform.panY : 0,
+    zoom:
+      Number.isFinite(transform.zoom) && transform.zoom >= 0.01
+        ? transform.zoom
+        : 0.01,
   };
 }
 
@@ -312,9 +315,12 @@ const ParameterControl = memo(function ParameterControl({
   }, [isOverridden, liveValue]);
 
   const updateValue = (nextValue: number) => {
-    parameterValuesRef.current[parameter.id] = nextValue;
+    if (!Number.isFinite(nextValue)) return;
+
+    const clampedValue = clampParameterValue(nextValue, parameter);
+    parameterValuesRef.current[parameter.id] = clampedValue;
     setIsOverridden(true);
-    setValue(nextValue);
+    setValue(clampedValue);
   };
   const resetValue = () => {
     delete parameterValuesRef.current[parameter.id];
@@ -343,15 +349,27 @@ const ParameterControl = memo(function ParameterControl({
           {value.toFixed(2)}
         </output>
       </div>
-      <input
-        aria-label={parameter.id}
-        max={parameter.maximumValue}
-        min={parameter.minimumValue}
-        onChange={(event) => updateValue(Number(event.target.value))}
-        step={step}
-        type="range"
-        value={value}
-      />
+      <div className="parameter-value-control">
+        <input
+          aria-label={parameter.id}
+          max={parameter.maximumValue}
+          min={parameter.minimumValue}
+          onChange={(event) => updateValue(Number(event.target.value))}
+          step={step}
+          type="range"
+          value={value}
+        />
+        <input
+          aria-label={`${parameter.id} value`}
+          className="number-input"
+          max={parameter.maximumValue}
+          min={parameter.minimumValue}
+          onChange={(event) => updateValue(Number(event.target.value))}
+          step={step}
+          type="number"
+          value={value}
+        />
+      </div>
       <div className="parameter-range">
         <span>{parameter.minimumValue.toFixed(1)}</span>
         <span>{parameter.defaultValue.toFixed(1)}</span>
@@ -1301,13 +1319,11 @@ export function Live2DViewerClient({
               </div>
 
               <div className="position-grid">
-                <label className="range-field">
+                <label className="number-field">
                   <span>X</span>
                   <input
-                    min={-2}
-                    max={2}
                     step={0.01}
-                    type="range"
+                    type="number"
                     value={selectedViewTransform.panX}
                     onChange={(event) =>
                       updateSelectedViewTransform({
@@ -1315,16 +1331,13 @@ export function Live2DViewerClient({
                       })
                     }
                   />
-                  <output>{selectedViewTransform.panX.toFixed(2)}</output>
                 </label>
 
-                <label className="range-field">
+                <label className="number-field">
                   <span>Y</span>
                   <input
-                    min={-2}
-                    max={2}
                     step={0.01}
-                    type="range"
+                    type="number"
                     value={selectedViewTransform.panY}
                     onChange={(event) =>
                       updateSelectedViewTransform({
@@ -1332,16 +1345,14 @@ export function Live2DViewerClient({
                       })
                     }
                   />
-                  <output>{selectedViewTransform.panY.toFixed(2)}</output>
                 </label>
 
-                <label className="range-field">
+                <label className="number-field">
                   <span>Zoom</span>
                   <input
-                    min={0.35}
-                    max={4}
+                    min={0.01}
                     step={0.01}
-                    type="range"
+                    type="number"
                     value={selectedViewTransform.zoom}
                     onChange={(event) =>
                       updateSelectedViewTransform({
@@ -1349,7 +1360,6 @@ export function Live2DViewerClient({
                       })
                     }
                   />
-                  <output>{selectedViewTransform.zoom.toFixed(2)}</output>
                 </label>
               </div>
 

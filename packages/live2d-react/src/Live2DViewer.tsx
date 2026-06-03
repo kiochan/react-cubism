@@ -536,7 +536,7 @@ export function Live2DViewer({
 
     viewTransformRef.current = {
       ...viewTransformRef.current,
-      zoom: Math.min(4, Math.max(0.35, nextZoom)),
+      zoom: Math.max(0.01, nextZoom),
     };
     onViewTransformChangedRef.current?.(viewTransformRef.current);
   };
