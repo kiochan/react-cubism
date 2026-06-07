@@ -414,12 +414,8 @@ export function Live2DViewerClient({
     [modelUrl, models]
   );
   const [selectedUrl, setSelectedUrl] = useState(modelUrl);
-  const [loadedUrls, setLoadedUrls] = useState<Set<string>>(
-    () => new Set([modelUrl])
-  );
-  const [visibleUrls, setVisibleUrls] = useState<Set<string>>(
-    () => new Set([modelUrl])
-  );
+  const [loadedUrls, setLoadedUrls] = useState<Set<string>>(() => new Set());
+  const [visibleUrls, setVisibleUrls] = useState<Set<string>>(() => new Set());
   const [layerOrder, setLayerOrder] = useState<string[]>(() =>
     options.map((model) => model.url)
   );
@@ -590,18 +586,12 @@ export function Live2DViewerClient({
   useEffect(() => {
     const validUrls = new Set(options.map((model) => model.url));
     setLoadedUrls((current) => {
-      const next = new Set(
-        Array.from(current).filter((url) => validUrls.has(url))
-      );
-      if (next.size === 0 && options[0]) next.add(options[0].url);
-      return next;
+      return new Set(Array.from(current).filter((url) => validUrls.has(url)));
     });
     setVisibleUrls((current) => {
-      const next = new Set(
+      return new Set(
         Array.from(current).filter((url) => validUrls.has(url))
       );
-      if (next.size === 0 && options[0]) next.add(options[0].url);
-      return next;
     });
     if (!validUrls.has(selectedUrl) && options[0]) {
       setSelectedUrl(options[0].url);
