@@ -58,6 +58,16 @@ const BLEND_MODE_OPTIONS: Array<{ label: string; value: Live2DBlendMode }> = [
   { label: "Multiply", value: "multiply" },
 ];
 
+const INSPECTOR_CARD_LABELS = {
+  parameterSync: "Parameter-Sync",
+  positionSync: "Position-Sync",
+  layer: "Layer Mode",
+  parameters: "Parameters",
+  position: "Position",
+} as const;
+
+type InspectorCardId = keyof typeof INSPECTOR_CARD_LABELS;
+
 interface ParameterSyncRule {
   id: string;
   enabled: boolean;
@@ -455,9 +465,20 @@ export function Live2DViewerClient({
     ),
   ]);
   const [expandedCards, setExpandedCards] = useState({
-    sync: true,
+    parameterSync: true,
+    positionSync: true,
     layer: true,
-    controls: true,
+    parameters: true,
+    position: true,
+  });
+  const [visibleCards, setVisibleCards] = useState<
+    Record<InspectorCardId, boolean>
+  >({
+    parameterSync: true,
+    positionSync: true,
+    layer: true,
+    parameters: true,
+    position: true,
   });
   const [resetVersion, setResetVersion] = useState(0);
   const parameterValuesRefs = useRef<
@@ -494,7 +515,6 @@ export function Live2DViewerClient({
   const visibleLoadedModels = loadedModels.filter((model) =>
     visibleUrls.has(model.url)
   );
-  const controlModels = loadedModels.length > 0 ? loadedModels : orderedOptions;
   const modelCounts = options.reduce(
     (counts, model) => ({
       ...counts,
@@ -833,8 +853,14 @@ export function Live2DViewerClient({
       current.length === 1 ? current : current.filter((rule) => rule.id !== id)
     );
   };
-  const toggleCard = (card: keyof typeof expandedCards) => {
+  const toggleCard = (card: InspectorCardId) => {
     setExpandedCards((current) => ({
+      ...current,
+      [card]: !current[card],
+    }));
+  };
+  const toggleVisibleCard = (card: InspectorCardId) => {
+    setVisibleCards((current) => ({
       ...current,
       [card]: !current[card],
     }));
@@ -1180,407 +1206,444 @@ export function Live2DViewerClient({
         <div className="inspector-header">
           <div>
             <p className="eyebrow">Studio</p>
-            <h2>{selectedModel?.label ?? "Controls"}</h2>
+            <h2>{selectedModel?.label ?? "Studio"}</h2>
           </div>
+          <details className="card-menu">
+            <summary>Cards</summary>
+            <div className="card-menu-panel">
+              {(Object.keys(INSPECTOR_CARD_LABELS) as InspectorCardId[]).map(
+                (card) => (
+                  <label className="card-menu-option" key={card}>
+                    <input
+                      checked={visibleCards[card]}
+                      onChange={() => toggleVisibleCard(card)}
+                      type="checkbox"
+                    />
+                    <span>{INSPECTOR_CARD_LABELS[card]}</span>
+                  </label>
+                )
+              )}
+            </div>
+          </details>
         </div>
 
-        <div className="inspector-card">
-          <button
-            className="card-toggle"
-            type="button"
-            aria-expanded={expandedCards.sync}
-            onClick={() => toggleCard("sync")}
-          >
-            <span>Sync</span>
-            <span className="card-meta">
-              {parameterSyncRules.filter((rule) => rule.enabled).length +
-                (positionSync.enabled ? 1 : 0)}
-            </span>
-          </button>
+        {visibleCards.parameterSync ? (
+          <div className="inspector-card">
+            <button
+              className="card-toggle"
+              type="button"
+              aria-expanded={expandedCards.parameterSync}
+              onClick={() => toggleCard("parameterSync")}
+            >
+              <span>Parameter-Sync</span>
+              <span className="card-meta">
+                {parameterSyncRules.filter((rule) => rule.enabled).length}
+              </span>
+            </button>
 
-          {expandedCards.sync ? (
-            <div className="card-body">
-              <div className="section-heading">
-                <span>Parameter</span>
-                <button
-                  className="inline-action"
-                  type="button"
-                  onClick={addSyncRule}
-                  disabled={options.length === 0}
-                >
-                  Add
-                </button>
-              </div>
+            {expandedCards.parameterSync ? (
+              <div className="card-body">
+                <div className="section-heading">
+                  <span>Rules</span>
+                  <button
+                    className="inline-action"
+                    type="button"
+                    onClick={addSyncRule}
+                    disabled={options.length === 0}
+                  >
+                    Add
+                  </button>
+                </div>
 
-              <div className="sync-rule-list">
-                {syncRuleSummaries.map((rule, index) => (
-                  <div className="sync-panel" key={rule.id}>
-                    <div className="section-heading">
-                      <span>Rule {index + 1}</span>
-                      <div className="sync-rule-actions">
-                        <button
-                          className={`switch-toggle${
-                            rule.enabled ? " active" : ""
-                          }`}
-                          type="button"
-                          role="switch"
-                          aria-checked={rule.enabled}
-                          onClick={() =>
+                <div className="sync-rule-list">
+                  {syncRuleSummaries.map((rule, index) => (
+                    <div className="sync-panel" key={rule.id}>
+                      <div className="section-heading">
+                        <span>Rule {index + 1}</span>
+                        <div className="sync-rule-actions">
+                          <button
+                            className={`switch-toggle${
+                              rule.enabled ? " active" : ""
+                            }`}
+                            type="button"
+                            role="switch"
+                            aria-checked={rule.enabled}
+                            onClick={() =>
+                              updateSyncRule(rule.id, {
+                                enabled: !rule.enabled,
+                              })
+                            }
+                          >
+                            <span className="switch-track" aria-hidden="true" />
+                            <span className="switch-label">Sync</span>
+                          </button>
+                          <button
+                            className="layer-button"
+                            type="button"
+                            title="Remove sync rule"
+                            aria-label="Remove sync rule"
+                            disabled={parameterSyncRules.length === 1}
+                            onClick={() => removeSyncRule(rule.id)}
+                          >
+                            <span aria-hidden="true">&#215;</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      <label className="search-field">
+                        <span>Expression</span>
+                        <textarea
+                          value={rule.mappingsText}
+                          onChange={(event) =>
                             updateSyncRule(rule.id, {
-                              enabled: !rule.enabled,
+                              mappingsText: event.target.value,
                             })
                           }
-                        >
-                          <span className="switch-track" aria-hidden="true" />
-                          <span className="switch-label">Sync</span>
-                        </button>
-                        <button
-                          className="layer-button"
-                          type="button"
-                          title="Remove sync rule"
-                          aria-label="Remove sync rule"
-                          disabled={parameterSyncRules.length === 1}
-                          onClick={() => removeSyncRule(rule.id)}
-                        >
-                          <span aria-hidden="true">&#215;</span>
-                        </button>
-                      </div>
+                          placeholder={
+                            "2head:Param*=4hairshadow:Param*\nParamMouthOpenY=ParamMouthOpen"
+                          }
+                          rows={3}
+                        />
+                      </label>
+
+                      <p className="sync-summary">
+                        {`${rule.activeMappingCount} active mappings. Use model:param=model:param for explicit routes.`}
+                      </p>
                     </div>
-
-                    <label className="search-field">
-                      <span>Expression</span>
-                      <textarea
-                        value={rule.mappingsText}
-                        onChange={(event) =>
-                          updateSyncRule(rule.id, {
-                            mappingsText: event.target.value,
-                          })
-                        }
-                        placeholder={
-                          "2head:Param*=4hairshadow:Param*\nParamMouthOpenY=ParamMouthOpen"
-                        }
-                        rows={3}
-                      />
-                    </label>
-
-                    <p className="sync-summary">
-                      {`${rule.activeMappingCount} active mappings. Use model:param=model:param for explicit routes.`}
-                    </p>
-                  </div>
-                ))}
-              </div>
-
-              <div className="section-heading">
-                <span>Position</span>
-                <button
-                  className={`switch-toggle${
-                    positionSync.enabled ? " active" : ""
-                  }`}
-                  type="button"
-                  role="switch"
-                  aria-checked={positionSync.enabled}
-                  onClick={() =>
-                    setPositionSync((current) => ({
-                      ...current,
-                      enabled: !current.enabled,
-                    }))
-                  }
-                >
-                  <span className="switch-track" aria-hidden="true" />
-                  <span className="switch-label">Sync</span>
-                </button>
-              </div>
-
-              <label className="search-field">
-                <span>Expression</span>
-                <textarea
-                  value={positionSync.expressionText}
-                  onChange={(event) =>
-                    setPositionSync((current) => ({
-                      ...current,
-                      expressionText: event.target.value,
-                    }))
-                  }
-                  placeholder="A=B=C=D"
-                  rows={2}
-                />
-              </label>
-
-              <p className="sync-summary">
-                {positionSync.expressionText.trim()
-                  ? `${positionSyncGroups.length} position sync group${
-                      positionSyncGroups.length === 1 ? "" : "s"
-                    }. First model in each group drives the rest.`
-                  : "Enter groups like A=B=C. The first model drives the rest."}
-              </p>
-            </div>
-          ) : null}
-        </div>
-
-        <div className="inspector-card">
-          <button
-            className="card-toggle"
-            type="button"
-            aria-expanded={expandedCards.layer}
-            onClick={() => toggleCard("layer")}
-          >
-            <span>Layer</span>
-            <span className="card-meta">
-              {visibleUrls.has(selectedUrl) ? "visible" : "hidden"}
-            </span>
-          </button>
-
-          {expandedCards.layer ? (
-            <div className="card-body">
-              <label className="search-field">
-                <span>Blend mode</span>
-                <select
-                  value={selectedLayerRenderSettings.blendMode}
-                  disabled={!loadedUrls.has(selectedUrl)}
-                  onChange={(event) =>
-                    updateLayerRenderSettings(selectedUrl, {
-                      blendMode: event.target.value as Live2DBlendMode,
-                    })
-                  }
-                >
-                  {BLEND_MODE_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
                   ))}
-                </select>
-              </label>
-
-              <label className="search-field">
-                <span>Clip to</span>
-                <select
-                  value={selectedLayerRenderSettings.clipToModelUrl}
-                  disabled={
-                    !loadedUrls.has(selectedUrl) || loadedModels.length < 2
-                  }
-                  onChange={(event) =>
-                    updateLayerRenderSettings(selectedUrl, {
-                      clipToModelUrl: event.target.value,
-                    })
-                  }
-                >
-                  <option value="">None</option>
-                  {loadedModels
-                    .filter((model) => model.url !== selectedUrl)
-                    .map((model) => (
-                      <option key={model.url} value={model.url}>
-                        {model.label}
-                      </option>
-                    ))}
-                </select>
-              </label>
-            </div>
-          ) : null}
-        </div>
-
-        <div className="inspector-card parameter-card controls-card">
-          <button
-            className="card-toggle"
-            type="button"
-            aria-expanded={expandedCards.controls}
-            onClick={() => toggleCard("controls")}
-          >
-            <span>Controls</span>
-            <span className="card-meta">
-              {selectedModel?.label ?? "model"}
-            </span>
-          </button>
-
-          {expandedCards.controls ? (
-            <div className="card-body controls-card-body">
-              <label className="search-field">
-                <span>Model</span>
-                <select
-                  value={selectedUrl}
-                  onChange={(event) => {
-                    setSelectedUrl(event.target.value);
-                    setParameterFilter("");
-                  }}
-                >
-                  {controlModels.map((model) => (
-                    <option key={model.url} value={model.url}>
-                      {model.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <div className="section-heading">
-                <span>Parameters</span>
-                <span className="muted">{parameters.length}</span>
+                </div>
               </div>
+            ) : null}
+          </div>
+        ) : null}
 
-              <div className="parameter-tools">
+        {visibleCards.positionSync ? (
+          <div className="inspector-card">
+            <button
+              className="card-toggle"
+              type="button"
+              aria-expanded={expandedCards.positionSync}
+              onClick={() => toggleCard("positionSync")}
+            >
+              <span>Position-Sync</span>
+              <span className="card-meta">
+                {positionSync.enabled ? "on" : "off"}
+              </span>
+            </button>
+
+            {expandedCards.positionSync ? (
+              <div className="card-body">
+                <div className="section-heading">
+                  <span>Position</span>
+                  <button
+                    className={`switch-toggle${
+                      positionSync.enabled ? " active" : ""
+                    }`}
+                    type="button"
+                    role="switch"
+                    aria-checked={positionSync.enabled}
+                    onClick={() =>
+                      setPositionSync((current) => ({
+                        ...current,
+                        enabled: !current.enabled,
+                      }))
+                    }
+                  >
+                    <span className="switch-track" aria-hidden="true" />
+                    <span className="switch-label">Sync</span>
+                  </button>
+                </div>
+
                 <label className="search-field">
-                  <span>Search</span>
-                  <input
-                    value={parameterFilter}
-                    onChange={(event) => setParameterFilter(event.target.value)}
-                    placeholder="ParamAngle, Eye, Mouth..."
-                    type="search"
+                  <span>Expression</span>
+                  <textarea
+                    value={positionSync.expressionText}
+                    onChange={(event) =>
+                      setPositionSync((current) => ({
+                        ...current,
+                        expressionText: event.target.value,
+                      }))
+                    }
+                    placeholder="A=B=C=D"
+                    rows={2}
                   />
                 </label>
 
+                <p className="sync-summary">
+                  {positionSync.expressionText.trim()
+                    ? `${positionSyncGroups.length} position sync group${
+                        positionSyncGroups.length === 1 ? "" : "s"
+                      }. First model in each group drives the rest.`
+                    : "Enter groups like A=B=C. The first model drives the rest."}
+                </p>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {visibleCards.layer ? (
+          <div className="inspector-card">
+            <button
+              className="card-toggle"
+              type="button"
+              aria-expanded={expandedCards.layer}
+              onClick={() => toggleCard("layer")}
+            >
+              <span>Layer Mode</span>
+              <span className="card-meta">
+                {visibleUrls.has(selectedUrl) ? "visible" : "hidden"}
+              </span>
+            </button>
+
+            {expandedCards.layer ? (
+              <div className="card-body">
                 <label className="search-field">
-                  <span>Update rate</span>
+                  <span>Blend mode</span>
                   <select
-                    value={parameterUpdateFps}
+                    value={selectedLayerRenderSettings.blendMode}
+                    disabled={!loadedUrls.has(selectedUrl)}
                     onChange={(event) =>
-                      setParameterUpdateFps(Number(event.target.value))
+                      updateLayerRenderSettings(selectedUrl, {
+                        blendMode: event.target.value as Live2DBlendMode,
+                      })
                     }
                   >
-                    {PARAMETER_UPDATE_RATES.map((rate) => (
-                      <option key={rate.value} value={rate.value}>
-                        {rate.label}
+                    {BLEND_MODE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
                       </option>
                     ))}
                   </select>
                 </label>
-              </div>
 
-              <button
-                className="ghost-button"
-                type="button"
-                onClick={resetAllParameters}
-                disabled={parameters.length === 0}
-              >
-                Reset Parameters
-              </button>
-
-              <div className="parameter-list" aria-label="Live2D parameters">
-                {filteredParameters.map((parameter) => (
-                  <ParameterControl
-                    key={parameter.id}
-                    parameter={parameter}
-                    liveValue={liveParameterValues[parameter.id]}
-                    parameterValuesRef={selectedParameterValuesRef}
-                    resetVersion={resetVersion}
-                  />
-                ))}
-
-                {parameters.length === 0 ? (
-                  <p className="empty-copy">
-                    Parameters will appear here after the selected model
-                    finishes loading.
-                  </p>
-                ) : null}
-
-                {parameters.length > 0 && filteredParameters.length === 0 ? (
-                  <p className="empty-copy">No parameters match this search.</p>
-                ) : null}
-              </div>
-
-              <div className="section-heading">
-                <span>Position</span>
-                <span className="muted">
-                  {selectedViewTransform.zoom.toFixed(2)}x
-                </span>
-              </div>
-
-              <div className="position-grid">
-                <label className="number-field">
-                  <span>X</span>
-                  <input
-                    step={0.01}
-                    type="number"
-                    value={selectedViewTransform.panX}
+                <label className="search-field">
+                  <span>Clip to</span>
+                  <select
+                    value={selectedLayerRenderSettings.clipToModelUrl}
+                    disabled={
+                      !loadedUrls.has(selectedUrl) || loadedModels.length < 2
+                    }
                     onChange={(event) =>
-                      updateSelectedViewTransform({
-                        panX: Number(event.target.value),
+                      updateLayerRenderSettings(selectedUrl, {
+                        clipToModelUrl: event.target.value,
                       })
                     }
-                  />
-                </label>
-
-                <label className="number-field">
-                  <span>Y</span>
-                  <input
-                    step={0.01}
-                    type="number"
-                    value={selectedViewTransform.panY}
-                    onChange={(event) =>
-                      updateSelectedViewTransform({
-                        panY: Number(event.target.value),
-                      })
-                    }
-                  />
-                </label>
-
-                <label className="number-field">
-                  <span>Zoom</span>
-                  <input
-                    min={0.01}
-                    step={0.01}
-                    type="number"
-                    value={selectedViewTransform.zoom}
-                    onChange={(event) =>
-                      updateSelectedViewTransform({
-                        zoom: Number(event.target.value),
-                      })
-                    }
-                  />
+                  >
+                    <option value="">None</option>
+                    {loadedModels
+                      .filter((model) => model.url !== selectedUrl)
+                      .map((model) => (
+                        <option key={model.url} value={model.url}>
+                          {model.label}
+                        </option>
+                      ))}
+                  </select>
                 </label>
               </div>
+            ) : null}
+          </div>
+        ) : null}
 
-              <button
-                className="ghost-button"
-                type="button"
-                onClick={resetSelectedViewTransform}
-              >
-                Reset Position
-              </button>
+        {visibleCards.parameters ? (
+          <div
+            className={`inspector-card${
+              expandedCards.parameters ? " parameter-card controls-card" : ""
+            }`}
+          >
+            <button
+              className="card-toggle"
+              type="button"
+              aria-expanded={expandedCards.parameters}
+              onClick={() => toggleCard("parameters")}
+            >
+              <span>Parameters</span>
+              <span className="card-meta">{parameters.length}</span>
+            </button>
 
-              <div className="animation-section">
-                <div className="section-heading">
-                  <span>Motions</span>
-                  <span className="muted">{motions.length}</span>
-                </div>
-                <div className="pill-list">
-                  {motions.map((motion) => (
-                    <button
-                      className="pill-button"
-                      key={`${motion.group}:${motion.index}`}
-                      onClick={() => requestMotion(motion)}
-                      type="button"
+            {expandedCards.parameters ? (
+              <div className="card-body controls-card-body">
+                <div className="parameter-tools">
+                  <label className="search-field">
+                    <span>Search</span>
+                    <input
+                      value={parameterFilter}
+                      onChange={(event) =>
+                        setParameterFilter(event.target.value)
+                      }
+                      placeholder="ParamAngle, Eye, Mouth..."
+                      type="search"
+                    />
+                  </label>
+
+                  <label className="search-field">
+                    <span>Update rate</span>
+                    <select
+                      value={parameterUpdateFps}
+                      onChange={(event) =>
+                        setParameterUpdateFps(Number(event.target.value))
+                      }
                     >
-                      {motion.name}
-                    </button>
+                      {PARAMETER_UPDATE_RATES.map((rate) => (
+                        <option key={rate.value} value={rate.value}>
+                          {rate.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <button
+                  className="ghost-button"
+                  type="button"
+                  onClick={resetAllParameters}
+                  disabled={parameters.length === 0}
+                >
+                  Reset Parameters
+                </button>
+
+                <div className="parameter-list" aria-label="Live2D parameters">
+                  {filteredParameters.map((parameter) => (
+                    <ParameterControl
+                      key={parameter.id}
+                      parameter={parameter}
+                      liveValue={liveParameterValues[parameter.id]}
+                      parameterValuesRef={selectedParameterValuesRef}
+                      resetVersion={resetVersion}
+                    />
                   ))}
-                  {motions.length === 0 ? (
-                    <p className="empty-copy compact">No motions found.</p>
+
+                  {parameters.length === 0 ? (
+                    <p className="empty-copy">
+                      Parameters will appear here after the highlighted model
+                      finishes loading.
+                    </p>
+                  ) : null}
+
+                  {parameters.length > 0 && filteredParameters.length === 0 ? (
+                    <p className="empty-copy">No parameters match this search.</p>
                   ) : null}
                 </div>
-              </div>
 
-              <div className="animation-section">
-                <div className="section-heading">
-                  <span>Expressions</span>
-                  <span className="muted">{expressions.length}</span>
+                <div className="animation-section">
+                  <div className="section-heading">
+                    <span>Motions</span>
+                    <span className="muted">{motions.length}</span>
+                  </div>
+                  <div className="pill-list">
+                    {motions.map((motion) => (
+                      <button
+                        className="pill-button"
+                        key={`${motion.group}:${motion.index}`}
+                        onClick={() => requestMotion(motion)}
+                        type="button"
+                      >
+                        {motion.name}
+                      </button>
+                    ))}
+                    {motions.length === 0 ? (
+                      <p className="empty-copy compact">No motions found.</p>
+                    ) : null}
+                  </div>
                 </div>
-                <div className="pill-list">
-                  {expressions.map((expression) => (
-                    <button
-                      className="pill-button"
-                      key={expression.index}
-                      onClick={() => requestExpression(expression)}
-                      type="button"
-                    >
-                      {expression.name}
-                    </button>
-                  ))}
-                  {expressions.length === 0 ? (
-                    <p className="empty-copy compact">No expressions found.</p>
-                  ) : null}
+
+                <div className="animation-section">
+                  <div className="section-heading">
+                    <span>Expressions</span>
+                    <span className="muted">{expressions.length}</span>
+                  </div>
+                  <div className="pill-list">
+                    {expressions.map((expression) => (
+                      <button
+                        className="pill-button"
+                        key={expression.index}
+                        onClick={() => requestExpression(expression)}
+                        type="button"
+                      >
+                        {expression.name}
+                      </button>
+                    ))}
+                    {expressions.length === 0 ? (
+                      <p className="empty-copy compact">No expressions found.</p>
+                    ) : null}
+                  </div>
                 </div>
               </div>
-            </div>
-          ) : null}
-        </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {visibleCards.position ? (
+          <div className="inspector-card">
+            <button
+              className="card-toggle"
+              type="button"
+              aria-expanded={expandedCards.position}
+              onClick={() => toggleCard("position")}
+            >
+              <span>Position</span>
+              <span className="card-meta">
+                {selectedViewTransform.zoom.toFixed(2)}x
+              </span>
+            </button>
+
+            {expandedCards.position ? (
+              <div className="card-body">
+                <div className="position-grid">
+                  <label className="number-field">
+                    <span>X</span>
+                    <input
+                      step={0.01}
+                      type="number"
+                      value={selectedViewTransform.panX}
+                      onChange={(event) =>
+                        updateSelectedViewTransform({
+                          panX: Number(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+
+                  <label className="number-field">
+                    <span>Y</span>
+                    <input
+                      step={0.01}
+                      type="number"
+                      value={selectedViewTransform.panY}
+                      onChange={(event) =>
+                        updateSelectedViewTransform({
+                          panY: Number(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+
+                  <label className="number-field">
+                    <span>Zoom</span>
+                    <input
+                      min={0.01}
+                      step={0.01}
+                      type="number"
+                      value={selectedViewTransform.zoom}
+                      onChange={(event) =>
+                        updateSelectedViewTransform({
+                          zoom: Number(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+
+                <button
+                  className="ghost-button"
+                  type="button"
+                  onClick={resetSelectedViewTransform}
+                >
+                  Reset Position
+                </button>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </aside>
     </section>
   );

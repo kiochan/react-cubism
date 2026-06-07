@@ -163,6 +163,77 @@ button {
   font-size: 16px;
 }
 
+.card-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.card-menu summary {
+  display: grid;
+  place-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(19, 23, 21, 0.82);
+  color: var(--foreground);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.card-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.card-menu[open] summary {
+  border-color: rgba(101, 214, 173, 0.36);
+  background: rgba(101, 214, 173, 0.12);
+}
+
+.card-menu-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  display: grid;
+  gap: 3px;
+  min-width: 168px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(27, 32, 29, 0.96), rgba(14, 17, 16, 0.96)),
+    var(--card);
+  box-shadow: var(--shadow);
+}
+
+.card-menu-option {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-height: 26px;
+  padding: 0 6px;
+  border-radius: 5px;
+  color: var(--foreground);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.card-menu-option:hover {
+  background: rgba(101, 214, 173, 0.1);
+}
+
+.card-menu-option input {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
 .eyebrow {
   margin: 0 0 3px;
   color: #8db5a4;
@@ -504,7 +575,9 @@ button {
 
 .model-actions {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 6px;
+  align-items: center;
   min-width: 0;
 }
 
@@ -523,6 +596,7 @@ button {
 
 .layer-actions {
   justify-content: end;
+  align-self: stretch;
 }
 
 .switch-toggle,
