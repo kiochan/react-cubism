@@ -19,7 +19,7 @@ import type {
   Live2DViewTransform,
 } from "live2d-react";
 
-// Dynamically import the viewer with SSR disabled because Live2DViewer requires
+// Dynamically import the viewer with SSR disabled because Live2D rendering uses
 // browser APIs (WebGL, fetch) that are not available on the server.
 const Live2DViewerDynamic = dynamic(
   () => import("live2d-react").then((m) => m.Live2DMultiViewer),
@@ -413,6 +413,8 @@ export function Live2DViewerClient({
   const [layerOrder, setLayerOrder] = useState<string[]>(() =>
     options.map((model) => model.url)
   );
+  const [draggedLayerUrl, setDraggedLayerUrl] = useState<string | null>(null);
+  const [dragOverLayerUrl, setDragOverLayerUrl] = useState<string | null>(null);
   const [parametersByUrl, setParametersByUrl] = useState<
     Record<string, Live2DParameter[]>
   >({});
@@ -698,6 +700,28 @@ export function Live2DViewerClient({
       return next;
     });
   };
+  const moveDisplayLayer = (
+    dragUrl: string,
+    targetUrl: string,
+    placement: "before" | "after"
+  ) => {
+    if (dragUrl === targetUrl) return;
+
+    setLayerOrder((current) => {
+      const displayOrder = [...current].reverse();
+      const nextDisplayOrder = displayOrder.filter((url) => url !== dragUrl);
+      const targetIndex = nextDisplayOrder.indexOf(targetUrl);
+
+      if (targetIndex === -1) return current;
+
+      nextDisplayOrder.splice(
+        placement === "before" ? targetIndex : targetIndex + 1,
+        0,
+        dragUrl
+      );
+      return nextDisplayOrder.reverse();
+    });
+  };
   const handleParametersLoaded = useCallback(
     (url: string, loadedParameters: Live2DParameter[]) => {
       setParametersByUrl((current) => ({
@@ -955,17 +979,51 @@ export function Live2DViewerClient({
               const canMoveUp = isLoaded && displayLayerIndex > 0;
               const canMoveDown =
                 isLoaded && displayLayerIndex < displayLoadedModels.length - 1;
-              const layerRenderSettings = getLayerRenderSettings(model.url);
-              const clipTargetOptions = loadedModels.filter(
-                (loadedModel) => loadedModel.url !== model.url
-              );
 
               return (
                 <div
                   key={model.url}
-                  className={`model-row${isSelected ? " selected" : ""}`}
+                  className={`model-row${isSelected ? " selected" : ""}${
+                    draggedLayerUrl === model.url ? " dragging" : ""
+                  }${dragOverLayerUrl === model.url ? " drop-target" : ""}`}
                   role="option"
                   aria-selected={isSelected}
+                  draggable
+                  onDragStart={(event) => {
+                    setDraggedLayerUrl(model.url);
+                    setDragOverLayerUrl(null);
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("text/plain", model.url);
+                  }}
+                  onDragEnd={() => {
+                    setDraggedLayerUrl(null);
+                    setDragOverLayerUrl(null);
+                  }}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    if (draggedLayerUrl !== model.url) {
+                      setDragOverLayerUrl(model.url);
+                    }
+                    event.dataTransfer.dropEffect = "move";
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    const dragUrl =
+                      event.dataTransfer.getData("text/plain") ??
+                      draggedLayerUrl;
+                    if (dragUrl) {
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      moveDisplayLayer(
+                        dragUrl,
+                        model.url,
+                        event.clientY < rect.top + rect.height / 2
+                          ? "before"
+                          : "after"
+                      );
+                    }
+                    setDraggedLayerUrl(null);
+                    setDragOverLayerUrl(null);
+                  }}
                 >
                   <button
                     className="model-select-button"
@@ -1031,49 +1089,6 @@ export function Live2DViewerClient({
                       >
                         <span aria-hidden="true">&#8595;</span>
                       </button>
-                    </div>
-                    <div className="layer-render-controls">
-                      <label className="compact-select">
-                        <span>Blend</span>
-                        <select
-                          value={layerRenderSettings.blendMode}
-                          disabled={!isLoaded}
-                          onChange={(event) =>
-                            updateLayerRenderSettings(model.url, {
-                              blendMode: event.target
-                                .value as Live2DBlendMode,
-                            })
-                          }
-                        >
-                          {BLEND_MODE_OPTIONS.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <label className="compact-select">
-                        <span>Clip</span>
-                        <select
-                          value={layerRenderSettings.clipToModelUrl}
-                          disabled={!isLoaded || clipTargetOptions.length === 0}
-                          onChange={(event) =>
-                            updateLayerRenderSettings(model.url, {
-                              clipToModelUrl: event.target.value,
-                            })
-                          }
-                        >
-                          <option value="">None</option>
-                          {clipTargetOptions.map((targetModel) => (
-                            <option
-                              key={targetModel.url}
-                              value={targetModel.url}
-                            >
-                              {targetModel.label}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
                     </div>
                   </div>
                 </div>
