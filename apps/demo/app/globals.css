@@ -508,6 +508,40 @@ button {
   justify-content: end;
 }
 
+.layer-render-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.compact-select {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.compact-select select {
+  min-width: 0;
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(19, 23, 21, 0.82);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 12px;
+}
+
+.compact-select select:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
 .switch-toggle,
 .layer-button,
 .inline-action {
@@ -520,6 +554,12 @@ button {
   cursor: pointer;
   font-size: 12px;
   font-weight: 650;
+  transition:
+    background 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    color 160ms ease,
+    transform 160ms ease;
 }
 
 .switch-toggle {
@@ -528,7 +568,9 @@ button {
   justify-content: center;
   gap: 6px;
   width: 100%;
+  min-height: 34px;
   min-width: 0;
+  border-radius: 8px;
   font-size: 0;
   white-space: nowrap;
 }
@@ -579,8 +621,13 @@ button {
 
 .switch-toggle.active {
   border-color: var(--primary);
-  background: var(--primary);
-  color: var(--primary-foreground);
+  background:
+    linear-gradient(180deg, rgba(101, 214, 173, 0.24), rgba(101, 214, 173, 0.12)),
+    rgba(7, 20, 16, 0.72);
+  color: #9ff0d2;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 8px 18px rgba(0, 0, 0, 0.18);
 }
 
 .switch-toggle.active .switch-track {
@@ -590,6 +637,13 @@ button {
 .switch-toggle.active .switch-track::after {
   background: var(--primary-foreground);
   transform: translateX(10px);
+}
+
+.switch-toggle:not(:disabled):hover,
+.layer-button:not(:disabled):hover {
+  border-color: rgba(101, 214, 173, 0.36);
+  background: rgba(101, 214, 173, 0.12);
+  transform: translateY(-1px);
 }
 
 .layer-button {
@@ -814,14 +868,29 @@ button {
 
 .model-row.selected .switch-toggle:not(.active),
 .model-row.selected .layer-button:not(:disabled) {
-  background: rgba(7, 20, 16, 0.24);
+  border-color: rgba(187, 232, 213, 0.2);
+  background: rgba(7, 20, 16, 0.26);
   color: var(--foreground);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 .model-row.selected .switch-toggle.active {
-  border-color: rgba(250, 250, 250, 0.54);
-  background: var(--primary-foreground);
-  color: var(--primary);
+  border-color: rgba(153, 244, 208, 0.72);
+  background:
+    linear-gradient(180deg, rgba(173, 255, 222, 0.22), rgba(101, 214, 173, 0.16)),
+    rgba(8, 31, 25, 0.78);
+  color: #b7ffe5;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    0 10px 22px rgba(0, 0, 0, 0.2);
+}
+
+.model-row.selected .switch-toggle.active .switch-track {
+  background: rgba(183, 255, 229, 0.24);
+}
+
+.model-row.selected .switch-toggle.active .switch-track::after {
+  background: #d9fff1;
 }
 
 .empty-copy {

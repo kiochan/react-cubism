@@ -30,6 +30,23 @@ export interface Live2DViewerProps {
   onExpressionsLoaded?: (expressions: Live2DExpressionOption[]) => void;
 }
 
+export type Live2DBlendMode = "normal" | "multiply";
+
+export interface Live2DModelLayerProps extends Live2DViewerProps {
+  visible?: boolean;
+  interactive?: boolean;
+  blendMode?: Live2DBlendMode;
+  clipToModelUrl?: string | null;
+}
+
+export interface Live2DMultiViewerProps {
+  models: Live2DModelLayerProps[];
+  width?: number;
+  height?: number;
+  fitToContainer?: boolean;
+  selectedModelUrl?: string;
+}
+
 export interface Live2DViewTransform {
   panX: number;
   panY: number;
@@ -263,6 +280,190 @@ function createTexture(
   );
 
   return texture;
+}
+
+function createLayerRenderTarget(
+  gl: WebGL2RenderingContext,
+  width: number,
+  height: number
+) {
+  const texture = gl.createTexture();
+  const framebuffer = gl.createFramebuffer();
+
+  if (!texture || !framebuffer) {
+    throw new Error("Unable to create layer render target.");
+  }
+
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texImage2D(
+    gl.TEXTURE_2D,
+    0,
+    gl.RGBA,
+    width,
+    height,
+    0,
+    gl.RGBA,
+    gl.UNSIGNED_BYTE,
+    null
+  );
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+  gl.framebufferTexture2D(
+    gl.FRAMEBUFFER,
+    gl.COLOR_ATTACHMENT0,
+    gl.TEXTURE_2D,
+    texture,
+    0
+  );
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.bindTexture(gl.TEXTURE_2D, null);
+
+  return {
+    framebuffer,
+    texture,
+    release: () => {
+      gl.deleteFramebuffer(framebuffer);
+      gl.deleteTexture(texture);
+    },
+  };
+}
+
+function createShader(
+  gl: WebGL2RenderingContext,
+  type: number,
+  source: string
+) {
+  const shader = gl.createShader(type);
+  if (!shader) throw new Error("Unable to create shader.");
+
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    const message = gl.getShaderInfoLog(shader) ?? "Unknown shader error.";
+    gl.deleteShader(shader);
+    throw new Error(message);
+  }
+
+  return shader;
+}
+
+function createCompositeRenderer(gl: WebGL2RenderingContext) {
+  const vertexShader = createShader(
+    gl,
+    gl.VERTEX_SHADER,
+    `#version 300 es
+    in vec2 a_position;
+    out vec2 v_uv;
+
+    void main() {
+      v_uv = a_position * 0.5 + 0.5;
+      gl_Position = vec4(a_position, 0.0, 1.0);
+    }`
+  );
+  const fragmentShader = createShader(
+    gl,
+    gl.FRAGMENT_SHADER,
+    `#version 300 es
+    precision mediump float;
+
+    uniform sampler2D u_source;
+    uniform sampler2D u_mask;
+    uniform bool u_hasMask;
+    in vec2 v_uv;
+    out vec4 outColor;
+
+    void main() {
+      vec4 color = texture(u_source, v_uv);
+      if (u_hasMask) {
+        color *= texture(u_mask, v_uv).a;
+      }
+      outColor = color;
+    }`
+  );
+  const program = gl.createProgram();
+  const buffer = gl.createBuffer();
+  const vertexArray = gl.createVertexArray();
+
+  if (!program || !buffer || !vertexArray) {
+    throw new Error("Unable to create composite renderer.");
+  }
+
+  gl.attachShader(program, vertexShader);
+  gl.attachShader(program, fragmentShader);
+  gl.linkProgram(program);
+  gl.deleteShader(vertexShader);
+  gl.deleteShader(fragmentShader);
+
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    const message = gl.getProgramInfoLog(program) ?? "Unknown program error.";
+    gl.deleteProgram(program);
+    gl.deleteBuffer(buffer);
+    gl.deleteVertexArray(vertexArray);
+    throw new Error(message);
+  }
+
+  const positionLocation = gl.getAttribLocation(program, "a_position");
+  const sourceLocation = gl.getUniformLocation(program, "u_source");
+  const maskLocation = gl.getUniformLocation(program, "u_mask");
+  const hasMaskLocation = gl.getUniformLocation(program, "u_hasMask");
+
+  gl.bindVertexArray(vertexArray);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(
+    gl.ARRAY_BUFFER,
+    new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+    gl.STATIC_DRAW
+  );
+  gl.enableVertexAttribArray(positionLocation);
+  gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+  return {
+    draw: (
+      source: WebGLTexture,
+      mask: WebGLTexture | null,
+      blendMode: Live2DBlendMode
+    ) => {
+      gl.useProgram(program);
+      gl.bindVertexArray(vertexArray);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, source);
+      gl.uniform1i(sourceLocation, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, mask);
+      gl.uniform1i(maskLocation, 1);
+      gl.uniform1i(hasMaskLocation, mask ? 1 : 0);
+      gl.enable(gl.BLEND);
+      if (blendMode === "multiply") {
+        gl.blendFuncSeparate(
+          gl.DST_COLOR,
+          gl.ONE_MINUS_SRC_ALPHA,
+          gl.ONE,
+          gl.ONE_MINUS_SRC_ALPHA
+        );
+      } else {
+        gl.blendFuncSeparate(
+          gl.ONE,
+          gl.ONE_MINUS_SRC_ALPHA,
+          gl.ONE,
+          gl.ONE_MINUS_SRC_ALPHA
+        );
+      }
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.bindVertexArray(null);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+    },
+    release: () => {
+      gl.deleteProgram(program);
+      gl.deleteBuffer(buffer);
+      gl.deleteVertexArray(vertexArray);
+    },
+  };
 }
 
 function createMvpMatrix(
@@ -956,6 +1157,794 @@ export function Live2DViewer({
         onWheel={handleWheel}
         style={{
           cursor: dragRef.current ? "grabbing" : "grab",
+          display: "block",
+          height: displaySize.height,
+          touchAction: "none",
+          width: displaySize.width,
+        }}
+      />
+    </div>
+  );
+}
+
+interface ResolvedModelLayerProps extends Live2DModelLayerProps {
+  parameterValuesRef: MutableRefObject<Record<string, number>>;
+  viewTransformRef: MutableRefObject<Live2DViewTransform>;
+}
+
+/**
+ * Renders multiple Live2D Cubism 5 models on one WebGL canvas.
+ */
+export function Live2DMultiViewer({
+  models,
+  width = 400,
+  height = 600,
+  fitToContainer = false,
+  selectedModelUrl,
+}: Live2DMultiViewerProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const [pixelRatio, setPixelRatio] = useState(1);
+  const [displaySize, setDisplaySize] = useState({ width, height });
+  const modelRefs = useRef(new Map<string, ResolvedModelLayerProps>());
+  const internalModelRefs = useRef(
+    new Map<
+      string,
+      {
+        parameterValuesRef: MutableRefObject<Record<string, number>>;
+        viewTransformRef: MutableRefObject<Live2DViewTransform>;
+      }
+    >()
+  );
+  const dragRef = useRef<{
+    pointerId: number;
+    lastX: number;
+    lastY: number;
+  } | null>(null);
+  const modelUrlsKey = models.map((model) => model.modelUrl).join("\n");
+
+  models.forEach((model) => {
+    let internal = internalModelRefs.current.get(model.modelUrl);
+    if (!internal) {
+      internal = {
+        parameterValuesRef: { current: model.parameterValues ?? {} },
+        viewTransformRef: {
+          current: model.viewTransform ?? { panX: 0, panY: 0, zoom: 1 },
+        },
+      };
+      internalModelRefs.current.set(model.modelUrl, internal);
+    }
+
+    if (!model.parameterValuesRef && model.parameterValues) {
+      internal.parameterValuesRef.current = model.parameterValues;
+    }
+    if (!model.viewTransformRef && model.viewTransform) {
+      internal.viewTransformRef.current = model.viewTransform;
+    }
+
+    modelRefs.current.set(model.modelUrl, {
+      ...model,
+      parameterValuesRef:
+        model.parameterValuesRef ?? internal.parameterValuesRef,
+      viewTransformRef: model.viewTransformRef ?? internal.viewTransformRef,
+    });
+  });
+
+  Array.from(modelRefs.current.keys()).forEach((modelUrl) => {
+    if (!models.some((model) => model.modelUrl === modelUrl)) {
+      modelRefs.current.delete(modelUrl);
+      internalModelRefs.current.delete(modelUrl);
+    }
+  });
+
+  useEffect(() => {
+    setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  }, []);
+
+  useEffect(() => {
+    if (!fitToContainer) {
+      setDisplaySize({ width, height });
+      return;
+    }
+
+    const wrapper = wrapperRef.current;
+    if (!wrapper) return;
+
+    const updateSize = () => {
+      const rect = wrapper.getBoundingClientRect();
+      setDisplaySize({
+        width: Math.max(1, Math.floor(rect.width)),
+        height: Math.max(1, Math.floor(rect.height)),
+      });
+    };
+
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(wrapper);
+
+    return () => observer.disconnect();
+  }, [fitToContainer, height, width]);
+
+  const getInteractiveModel = () => {
+    const ordered = models
+      .map((model) => modelRefs.current.get(model.modelUrl))
+      .filter((model): model is ResolvedModelLayerProps => Boolean(model));
+
+    return (
+      ordered.find(
+        (model) =>
+          model.modelUrl === selectedModelUrl &&
+          model.visible !== false &&
+          model.interactive !== false
+      ) ??
+      ordered.find(
+        (model) => model.visible !== false && model.interactive !== false
+      ) ??
+      null
+    );
+  };
+
+  const handlePointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
+    if (!getInteractiveModel()) return;
+
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = {
+      pointerId: event.pointerId,
+      lastX: event.clientX,
+      lastY: event.clientY,
+    };
+  };
+
+  const handlePointerMove = (event: PointerEvent<HTMLCanvasElement>) => {
+    const drag = dragRef.current;
+    const model = getInteractiveModel();
+    if (!drag || !model || drag.pointerId !== event.pointerId) return;
+
+    const canvas = event.currentTarget;
+    const rect = canvas.getBoundingClientRect();
+    const dx = event.clientX - drag.lastX;
+    const dy = event.clientY - drag.lastY;
+    drag.lastX = event.clientX;
+    drag.lastY = event.clientY;
+
+    model.viewTransformRef.current = {
+      ...model.viewTransformRef.current,
+      panX: model.viewTransformRef.current.panX + (dx / rect.width) * 2,
+      panY: model.viewTransformRef.current.panY - (dy / rect.height) * 2,
+    };
+    model.onViewTransformChanged?.(model.viewTransformRef.current);
+  };
+
+  const handlePointerUp = (event: PointerEvent<HTMLCanvasElement>) => {
+    if (dragRef.current?.pointerId === event.pointerId) {
+      dragRef.current = null;
+    }
+  };
+
+  const handleWheel = (event: WheelEvent<HTMLCanvasElement>) => {
+    const model = getInteractiveModel();
+    if (!model) return;
+
+    event.preventDefault();
+    const zoomFactor = Math.exp(-event.deltaY * 0.001);
+    const nextZoom = model.viewTransformRef.current.zoom * zoomFactor;
+
+    model.viewTransformRef.current = {
+      ...model.viewTransformRef.current,
+      zoom: Math.min(4, Math.max(0.35, nextZoom)),
+    };
+    model.onViewTransformChanged?.(model.viewTransformRef.current);
+  };
+
+  const resetViewTransform = () => {
+    const model = getInteractiveModel();
+    if (!model) return;
+
+    model.viewTransformRef.current = { panX: 0, panY: 0, zoom: 1 };
+    model.onViewTransformChanged?.(model.viewTransformRef.current);
+  };
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || models.length === 0) return;
+
+    let rafId = 0;
+    let stopped = false;
+    let glContext: WebGL2RenderingContext | null = null;
+    let compositeRenderer: ReturnType<typeof createCompositeRenderer> | null =
+      null;
+
+    type RuntimeLayer = {
+      modelUrl: string;
+      cubismMoc: {
+        createModel: () => any;
+        deleteModel: (model: any) => void;
+        release: () => void;
+      } | null;
+      cubismModel: any;
+      renderer: {
+        initialize: (model: any) => void;
+        startUp: (gl: WebGL2RenderingContext) => void;
+        setIsPremultipliedAlpha: (enabled: boolean) => void;
+        setMvpMatrix: (matrix: any) => void;
+        bindTexture: (index: number, texture: WebGLTexture) => void;
+        drawModel: (shaderPath?: string) => void;
+        release: () => void;
+      } | null;
+      renderTarget: ReturnType<typeof createLayerRenderTarget> | null;
+      textures: WebGLTexture[];
+      motionManager: any;
+      expressionManager: any;
+      physics: any;
+      pose: any;
+      eyeBlink: any;
+      breath: any;
+      parameterNames: Map<string, string>;
+      parameterIndices: Map<string, number>;
+      lastParameterReportTime: number;
+      lastMotionNonce: number;
+      lastExpressionNonce: number;
+      idleRestartPending: boolean;
+      idleMotion?: { group: string; index: number };
+      settings: ModelSettings;
+      startMotion: (group: string, index: number, loop: boolean) => Promise<void>;
+      startExpression: (index: number) => Promise<void>;
+    };
+
+    const runtimeLayers: RuntimeLayer[] = [];
+
+    const releaseLayer = (layer: RuntimeLayer) => {
+      layer.renderTarget?.release();
+      layer.renderer?.release();
+      layer.motionManager?.release();
+      layer.expressionManager?.release();
+      layer.physics?.release?.();
+      layer.textures.forEach((texture) => {
+        glContext?.deleteTexture(texture);
+      });
+      if (layer.cubismMoc && layer.cubismModel) {
+        layer.cubismMoc.deleteModel(layer.cubismModel);
+      }
+      layer.cubismMoc?.release();
+    };
+
+    (async () => {
+      try {
+        await loadScript(CUBISM_CORE_SCRIPT_SRC);
+      } catch {
+        console.error(
+          "[Live2DMultiViewer] Cubism 5 core not found.\n" +
+            "Copy live2dcubismcore.min.js to public/live2dcubism/Core/.\n" +
+            "See README.md for instructions."
+        );
+        return;
+      }
+      if (stopped) return;
+
+      if (!(window as any).Live2DCubismCore) {
+        console.error(
+          "[Live2DMultiViewer] Live2DCubismCore global not found after loading " +
+            `${CUBISM_CORE_SCRIPT_SRC}.`
+        );
+        return;
+      }
+
+      const gl = canvas.getContext("webgl2", {
+        premultipliedAlpha: true,
+        alpha: true,
+      });
+      if (!gl) {
+        console.error(
+          "[Live2DMultiViewer] WebGL2 is required by CubismRenderer_WebGL."
+        );
+        return;
+      }
+      glContext = gl;
+      compositeRenderer = createCompositeRenderer(gl);
+
+      const modules = await loadFrameworkModules();
+      const {
+        CubismFramework,
+        CubismEyeBlink,
+        CubismMatrix44,
+        CubismModelMatrix,
+        CubismMoc,
+        CubismMotion,
+        CubismMotionManager,
+        CubismExpressionMotion,
+        CubismExpressionMotionManager,
+        CubismPhysics,
+        CubismPose,
+        CubismRenderer_WebGL,
+      } = modules;
+      ensureFrameworkStarted(CubismFramework);
+      if (stopped) return;
+
+      async function createLayer(modelUrl: string): Promise<RuntimeLayer | null> {
+        const base = modelUrl.slice(0, modelUrl.lastIndexOf("/") + 1);
+        let settings: ModelSettings;
+        try {
+          const res = await fetch(modelUrl);
+          if (!res.ok) throw new Error(`HTTP ${res.status}: ${modelUrl}`);
+          settings = (await res.json()) as ModelSettings;
+        } catch (e) {
+          console.error("[Live2DMultiViewer] Failed to load model settings:", e);
+          return null;
+        }
+        if (stopped) return null;
+
+        const parameterNames = new Map<string, string>();
+        const displayInfoUrl = resolveResource(
+          base,
+          settings.FileReferences?.DisplayInfo
+        );
+        if (displayInfoUrl) {
+          try {
+            const res = await fetch(displayInfoUrl);
+            if (!res.ok) {
+              throw new Error(`HTTP ${res.status}: ${displayInfoUrl}`);
+            }
+            const displayInfo = (await res.json()) as DisplayInfo;
+            displayInfo.Parameters?.forEach((parameter) => {
+              if (!parameter.Id || !parameter.Name) return;
+
+              parameterNames.set(parameter.Id, parameter.Name);
+            });
+          } catch (e) {
+            console.error("[Live2DMultiViewer] Failed to load display info:", e);
+          }
+        }
+
+        const mocPath = settings.FileReferences?.Moc;
+        if (!mocPath) {
+          console.error("[Live2DMultiViewer] Model settings is missing the Moc path.");
+          return null;
+        }
+
+        let cubismMoc:
+          | {
+              createModel: () => any;
+              deleteModel: (model: any) => void;
+              release: () => void;
+            }
+          | null = null;
+        let cubismModel: any = null;
+        try {
+          const res = await fetch(base + mocPath);
+          if (!res.ok) throw new Error(`HTTP ${res.status}: ${mocPath}`);
+          const mocBuffer = await res.arrayBuffer();
+          cubismMoc = CubismMoc.create(mocBuffer, true);
+          cubismModel = cubismMoc?.createModel() ?? null;
+        } catch (e) {
+          console.error("[Live2DMultiViewer] Failed to create Cubism model:", e);
+          return null;
+        }
+        if (stopped || !cubismMoc || !cubismModel) return null;
+
+        const parameterIndices = new Map<string, number>();
+        getLive2DParameters(cubismModel, parameterNames).forEach(
+          (parameter, index) => {
+            parameterIndices.set(parameter.id, index);
+          }
+        );
+        modelRefs.current
+          .get(modelUrl)
+          ?.onParametersLoaded?.(
+            getLive2DParameters(cubismModel, parameterNames)
+          );
+
+        const motionManager = new CubismMotionManager();
+        const expressionManager = new CubismExpressionMotionManager();
+        const breath = createBreath(modules, cubismModel);
+
+        const eyeBlinkIds = getParameterIdsByGroup(settings, "EyeBlink").filter(
+          (id) => hasParameterId(cubismModel, id)
+        );
+        const motionEyeBlinkIds = eyeBlinkIds.map((id) =>
+          CubismFramework.getIdManager().getId(id)
+        );
+        const motionLipSyncIds = getParameterIdsByGroup(settings, "LipSync")
+          .filter((id) => hasParameterId(cubismModel, id))
+          .map((id) => CubismFramework.getIdManager().getId(id));
+        const eyeBlink =
+          eyeBlinkIds.length > 0 ? CubismEyeBlink.create() : null;
+        eyeBlink?.setParameterIds(motionEyeBlinkIds);
+
+        const motionDefinitions = new Map<
+          string,
+          {
+            group: string;
+            index: number;
+            url: string;
+            fadeInTime?: number;
+            fadeOutTime?: number;
+          }
+        >();
+        for (const [group, motions] of Object.entries(
+          settings.FileReferences?.Motions ?? {}
+        )) {
+          motions.forEach((motion, index) => {
+            const url = resolveResource(base, motion.File);
+            if (!url) return;
+
+            motionDefinitions.set(`${group}:${index}`, {
+              group,
+              index,
+              url,
+              fadeInTime: motion.FadeInTime,
+              fadeOutTime: motion.FadeOutTime,
+            });
+          });
+        }
+        modelRefs.current.get(modelUrl)?.onMotionsLoaded?.(
+          Array.from(motionDefinitions.values()).map((motion) => ({
+            group: motion.group,
+            index: motion.index,
+            name: `${motion.group} ${motion.index + 1}`,
+          }))
+        );
+
+        const expressionDefinitions: Array<{ name: string; url: string }> = [];
+        (settings.FileReferences?.Expressions ?? []).forEach(
+          (expression, index) => {
+            const url = resolveResource(base, expression.File);
+            if (!url) return;
+
+            expressionDefinitions[index] = {
+              name: expression.Name ?? `Expression ${index + 1}`,
+              url,
+            };
+          }
+        );
+        modelRefs.current.get(modelUrl)?.onExpressionsLoaded?.(
+          expressionDefinitions.map((expression, index) => ({
+            index,
+            name: expression.name,
+          }))
+        );
+
+        let physics: any = null;
+        const physicsUrl = resolveResource(
+          base,
+          settings.FileReferences?.Physics
+        );
+        if (physicsUrl) {
+          try {
+            const buffer = await loadArrayBuffer(physicsUrl);
+            physics = CubismPhysics.create(buffer, buffer.byteLength);
+          } catch (e) {
+            console.error("[Live2DMultiViewer] Failed to load physics:", e);
+          }
+        }
+
+        let pose: any = null;
+        const poseUrl = resolveResource(base, settings.FileReferences?.Pose);
+        if (poseUrl) {
+          try {
+            const buffer = await loadArrayBuffer(poseUrl);
+            pose = CubismPose.create(buffer, buffer.byteLength);
+          } catch (e) {
+            console.error("[Live2DMultiViewer] Failed to load pose:", e);
+          }
+        }
+
+        const runtimeLayer: RuntimeLayer = {
+          modelUrl,
+          cubismMoc,
+          cubismModel,
+          renderer: null,
+          renderTarget: null,
+          textures: [],
+          motionManager,
+          expressionManager,
+          physics,
+          pose,
+          eyeBlink,
+          breath,
+          parameterNames,
+          parameterIndices,
+          lastParameterReportTime: 0,
+          lastMotionNonce:
+            modelRefs.current.get(modelUrl)?.motionRequest?.nonce ?? 0,
+          lastExpressionNonce:
+            modelRefs.current.get(modelUrl)?.expressionRequest?.nonce ?? 0,
+          idleRestartPending: false,
+          settings,
+          startMotion: async (group, index, loop) => {
+            const definition = motionDefinitions.get(`${group}:${index}`);
+            if (!definition) return;
+
+            try {
+              const buffer = await loadArrayBuffer(definition.url);
+              const motion = CubismMotion.create(buffer, buffer.byteLength);
+              motion.setEffectIds(motionEyeBlinkIds, motionLipSyncIds);
+              motion.setLoop(loop);
+              if (definition.fadeInTime !== undefined) {
+                motion.setFadeInTime(definition.fadeInTime);
+              }
+              if (definition.fadeOutTime !== undefined) {
+                motion.setFadeOutTime(definition.fadeOutTime);
+              }
+              motionManager.startMotionPriority(motion, true, loop ? 1 : 3);
+            } catch (e) {
+              console.error("[Live2DMultiViewer] Failed to start motion:", e);
+            } finally {
+              if (loop) {
+                runtimeLayer.idleRestartPending = false;
+              }
+            }
+          },
+          startExpression: async (index) => {
+            const definition = expressionDefinitions[index];
+            if (!definition) return;
+
+            try {
+              const buffer = await loadArrayBuffer(definition.url);
+              const expression = CubismExpressionMotion.create(
+                buffer,
+                buffer.byteLength
+              );
+              expressionManager.startMotion(expression, true);
+            } catch (e) {
+              console.error("[Live2DMultiViewer] Failed to start expression:", e);
+            }
+          },
+        };
+
+        const idleMotion = Array.from(motionDefinitions.values()).find(
+          (motion) => motion.group.toLowerCase().includes("idle")
+        );
+        if (idleMotion) {
+          runtimeLayer.idleMotion = {
+            group: idleMotion.group,
+            index: idleMotion.index,
+          };
+          await runtimeLayer.startMotion(idleMotion.group, idleMotion.index, true);
+        }
+        cubismModel.saveParameters();
+
+        try {
+          const images = await Promise.all(
+            (settings.FileReferences?.Textures ?? []).map((texturePath) =>
+              loadImage(base + texturePath)
+            )
+          );
+          runtimeLayer.textures = images.map((image) => createTexture(gl, image));
+        } catch (e) {
+          console.error("[Live2DMultiViewer] Failed to load model textures:", e);
+          releaseLayer(runtimeLayer);
+          return null;
+        }
+        if (stopped) {
+          releaseLayer(runtimeLayer);
+          return null;
+        }
+
+        const renderer = new CubismRenderer_WebGL(canvas.width, canvas.height);
+        renderer.initialize(cubismModel);
+        renderer.startUp(gl);
+        renderer.setIsPremultipliedAlpha(true);
+        renderer.setMvpMatrix(
+          createMvpMatrix(
+            CubismMatrix44,
+            CubismModelMatrix,
+            cubismModel,
+            canvas,
+            settings.Layout,
+            modelRefs.current.get(modelUrl)?.viewTransformRef.current
+          )
+        );
+        runtimeLayer.textures.forEach((texture, index) =>
+          renderer.bindTexture(index, texture)
+        );
+        runtimeLayer.renderer = renderer;
+        runtimeLayer.renderTarget = createLayerRenderTarget(
+          gl,
+          canvas.width,
+          canvas.height
+        );
+
+        return runtimeLayer;
+      }
+
+      for (const model of models) {
+        const layer = await createLayer(model.modelUrl);
+        if (layer) runtimeLayers.push(layer);
+      }
+      if (stopped) return;
+
+      let lastFrameTime = performance.now();
+
+      function tick() {
+        if (stopped || !glContext) return;
+
+        const now = performance.now();
+        const deltaTimeSeconds = Math.min((now - lastFrameTime) / 1000, 0.1);
+        lastFrameTime = now;
+
+        const layersByUrl = new Map(
+          runtimeLayers.map((layer) => [layer.modelUrl, layer])
+        );
+        const maskModelUrls = new Set(
+          Array.from(modelRefs.current.values())
+            .filter((config) => config.visible !== false && config.clipToModelUrl)
+            .map((config) => config.clipToModelUrl as string)
+        );
+
+        runtimeLayers.forEach((layer) => {
+          const config = modelRefs.current.get(layer.modelUrl);
+          const shouldRender =
+            Boolean(config) &&
+            (config?.visible !== false || maskModelUrls.has(layer.modelUrl));
+          if (
+            !config ||
+            !shouldRender ||
+            !layer.renderer ||
+            !layer.renderTarget
+          ) {
+            return;
+          }
+
+          const requestedMotion = config.motionRequest;
+          if (requestedMotion && requestedMotion.nonce !== layer.lastMotionNonce) {
+            layer.lastMotionNonce = requestedMotion.nonce;
+            void layer.startMotion(
+              requestedMotion.group,
+              requestedMotion.index,
+              false
+            );
+          }
+          const requestedExpression = config.expressionRequest;
+          if (
+            requestedExpression &&
+            requestedExpression.nonce !== layer.lastExpressionNonce
+          ) {
+            layer.lastExpressionNonce = requestedExpression.nonce;
+            void layer.startExpression(requestedExpression.index);
+          }
+
+          layer.cubismModel.loadParameters();
+          layer.motionManager?.updateMotion(
+            layer.cubismModel,
+            deltaTimeSeconds
+          );
+          if (
+            layer.idleMotion &&
+            layer.motionManager?.isFinished() &&
+            !layer.idleRestartPending
+          ) {
+            layer.idleRestartPending = true;
+            void layer.startMotion(
+              layer.idleMotion.group,
+              layer.idleMotion.index,
+              true
+            );
+          }
+          layer.cubismModel.saveParameters();
+          layer.eyeBlink?.updateParameters(
+            layer.cubismModel,
+            deltaTimeSeconds
+          );
+          layer.expressionManager?.updateMotion(
+            layer.cubismModel,
+            deltaTimeSeconds
+          );
+          layer.breath?.updateParameters(layer.cubismModel, deltaTimeSeconds);
+          layer.physics?.evaluate(layer.cubismModel, deltaTimeSeconds);
+          layer.pose?.updateParameters(layer.cubismModel, deltaTimeSeconds);
+
+          Object.entries(config.parameterValuesRef.current).forEach(
+            ([id, value]) => {
+              const index = layer.parameterIndices.get(id);
+              if (index === undefined) return;
+
+              layer.cubismModel.setParameterValueByIndex(index, value, 1);
+            }
+          );
+
+          const parameterUpdateFps = config.parameterUpdateFps ?? 10;
+          const parameterReportInterval =
+            parameterUpdateFps <= 0 ? 0 : 1000 / parameterUpdateFps;
+          if (now - layer.lastParameterReportTime >= parameterReportInterval) {
+            layer.lastParameterReportTime = now;
+            config.onParameterValuesChanged?.(
+              Object.fromEntries(
+                getLive2DParameters(
+                  layer.cubismModel,
+                  layer.parameterNames
+                ).map((parameter) => [parameter.id, parameter.value])
+              )
+            );
+          }
+
+          layer.cubismModel.update();
+          glContext.bindFramebuffer(
+            glContext.FRAMEBUFFER,
+            layer.renderTarget.framebuffer
+          );
+          glContext.viewport(0, 0, canvas.width, canvas.height);
+          glContext.clearColor(0, 0, 0, 0);
+          glContext.clear(glContext.COLOR_BUFFER_BIT);
+          layer.renderer.setMvpMatrix(
+            createMvpMatrix(
+              CubismMatrix44,
+              CubismModelMatrix,
+              layer.cubismModel,
+              canvas,
+              layer.settings.Layout,
+              config.viewTransformRef.current
+            )
+          );
+          layer.renderer.drawModel(CUBISM_SHADER_DIR);
+        });
+
+        glContext.bindFramebuffer(glContext.FRAMEBUFFER, null);
+        glContext.viewport(0, 0, canvas.width, canvas.height);
+        glContext.clearColor(0, 0, 0, 0);
+        glContext.clear(glContext.COLOR_BUFFER_BIT);
+
+        runtimeLayers.forEach((layer) => {
+          const config = modelRefs.current.get(layer.modelUrl);
+          if (!config || config.visible === false || !layer.renderTarget) {
+            return;
+          }
+
+          const maskLayer = config.clipToModelUrl
+            ? layersByUrl.get(config.clipToModelUrl)
+            : null;
+
+          compositeRenderer?.draw(
+            layer.renderTarget.texture,
+            maskLayer?.renderTarget?.texture ?? null,
+            config.blendMode ?? "normal"
+          );
+        });
+
+        rafId = requestAnimationFrame(tick);
+      }
+
+      rafId = requestAnimationFrame(tick);
+    })().catch((err) => {
+      if (!stopped) console.error("[Live2DMultiViewer] Unexpected error:", err);
+    });
+
+    return () => {
+      stopped = true;
+      cancelAnimationFrame(rafId);
+      glContext?.bindFramebuffer(glContext.FRAMEBUFFER, null);
+      runtimeLayers.forEach(releaseLayer);
+      if (glContext) {
+        try {
+          compositeRenderer?.release();
+        } catch {
+          // Ignore cleanup failures from a lost WebGL context.
+        }
+      }
+    };
+  }, [displaySize.height, displaySize.width, modelUrlsKey, pixelRatio]);
+
+  return (
+    <div
+      ref={wrapperRef}
+      style={{
+        display: "grid",
+        height: fitToContainer ? "100%" : displaySize.height,
+        placeItems: "center",
+        width: fitToContainer ? "100%" : displaySize.width,
+      }}
+    >
+      <canvas
+        ref={canvasRef}
+        width={Math.round(displaySize.width * pixelRatio)}
+        height={Math.round(displaySize.height * pixelRatio)}
+        onDoubleClick={resetViewTransform}
+        onPointerCancel={handlePointerUp}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onWheel={handleWheel}
+        style={{
+          cursor: getInteractiveModel() ? "grab" : "default",
           display: "block",
           height: displaySize.height,
           touchAction: "none",

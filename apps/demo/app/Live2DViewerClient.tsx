@@ -10,6 +10,7 @@ import {
   useState,
 } from "react";
 import type {
+  Live2DBlendMode,
   Live2DExpressionOption,
   Live2DExpressionRequest,
   Live2DMotionOption,
@@ -21,7 +22,7 @@ import type {
 // Dynamically import the viewer with SSR disabled because Live2DViewer requires
 // browser APIs (WebGL, fetch) that are not available on the server.
 const Live2DViewerDynamic = dynamic(
-  () => import("live2d-react").then((m) => m.Live2DViewer),
+  () => import("live2d-react").then((m) => m.Live2DMultiViewer),
   { ssr: false, loading: () => <canvas width={400} height={600} /> }
 );
 
@@ -52,6 +53,11 @@ const DEFAULT_VIEW_TRANSFORM: Live2DViewTransform = {
   zoom: 1,
 };
 
+const BLEND_MODE_OPTIONS: Array<{ label: string; value: Live2DBlendMode }> = [
+  { label: "Normal", value: "normal" },
+  { label: "Multiply", value: "multiply" },
+];
+
 interface ParameterSyncRule {
   id: string;
   enabled: boolean;
@@ -68,6 +74,11 @@ interface SyncedParameters {
 interface PositionSyncState {
   enabled: boolean;
   expressionText: string;
+}
+
+interface LayerRenderSettings {
+  blendMode: Live2DBlendMode;
+  clipToModelUrl: string;
 }
 
 interface ParameterMappingRule {
@@ -429,6 +440,9 @@ export function Live2DViewerClient({
     enabled: false,
     expressionText: "",
   }));
+  const [layerRenderSettingsByUrl, setLayerRenderSettingsByUrl] = useState<
+    Record<string, LayerRenderSettings>
+  >({});
   const [parameterSyncRules, setParameterSyncRules] = useState<
     ParameterSyncRule[]
   >(() => [
@@ -440,6 +454,7 @@ export function Live2DViewerClient({
   ]);
   const [expandedCards, setExpandedCards] = useState({
     sync: true,
+    layer: true,
     controls: true,
   });
   const [resetVersion, setResetVersion] = useState(0);
@@ -459,6 +474,7 @@ export function Live2DViewerClient({
   const liveParameterValues = liveParameterValuesByUrl[selectedUrl] ?? {};
   const selectedViewTransform =
     viewTransformsByUrl[selectedUrl] ?? DEFAULT_VIEW_TRANSFORM;
+  const selectedLayerRenderSettings = getLayerRenderSettings(selectedUrl);
   const motions = motionsByUrl[selectedUrl] ?? [];
   const expressions = expressionsByUrl[selectedUrl] ?? [];
   const modelsByUrl = useMemo(
@@ -599,6 +615,21 @@ export function Live2DViewerClient({
         Object.entries(current).filter(([url]) => validUrls.has(url))
       )
     );
+    setLayerRenderSettingsByUrl((current) =>
+      Object.fromEntries(
+        Object.entries(current)
+          .filter(([url]) => validUrls.has(url))
+          .map(([url, settings]) => [
+            url,
+            {
+              ...settings,
+              clipToModelUrl: validUrls.has(settings.clipToModelUrl)
+                ? settings.clipToModelUrl
+                : "",
+            },
+          ])
+      )
+    );
   }, [options, selectedUrl]);
 
   const getParameterValuesRef = (url: string) => {
@@ -728,6 +759,24 @@ export function Live2DViewerClient({
   };
   const resetSelectedViewTransform = () => {
     updateViewTransform(selectedUrl, DEFAULT_VIEW_TRANSFORM);
+  };
+  function getLayerRenderSettings(url: string): LayerRenderSettings {
+    return layerRenderSettingsByUrl[url] ?? {
+      blendMode: "normal",
+      clipToModelUrl: "",
+    };
+  }
+  const updateLayerRenderSettings = (
+    url: string,
+    patch: Partial<LayerRenderSettings>
+  ) => {
+    setLayerRenderSettingsByUrl((current) => ({
+      ...current,
+      [url]: {
+        ...(current[url] ?? { blendMode: "normal", clipToModelUrl: "" }),
+        ...patch,
+      },
+    }));
   };
   const clearLastSyncedParameters = useCallback(() => {
     Object.values(lastSyncedParametersRef.current).forEach((ruleTargets) => {
@@ -906,6 +955,10 @@ export function Live2DViewerClient({
               const canMoveUp = isLoaded && displayLayerIndex > 0;
               const canMoveDown =
                 isLoaded && displayLayerIndex < displayLoadedModels.length - 1;
+              const layerRenderSettings = getLayerRenderSettings(model.url);
+              const clipTargetOptions = loadedModels.filter(
+                (loadedModel) => loadedModel.url !== model.url
+              );
 
               return (
                 <div
@@ -979,6 +1032,49 @@ export function Live2DViewerClient({
                         <span aria-hidden="true">&#8595;</span>
                       </button>
                     </div>
+                    <div className="layer-render-controls">
+                      <label className="compact-select">
+                        <span>Blend</span>
+                        <select
+                          value={layerRenderSettings.blendMode}
+                          disabled={!isLoaded}
+                          onChange={(event) =>
+                            updateLayerRenderSettings(model.url, {
+                              blendMode: event.target
+                                .value as Live2DBlendMode,
+                            })
+                          }
+                        >
+                          {BLEND_MODE_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="compact-select">
+                        <span>Clip</span>
+                        <select
+                          value={layerRenderSettings.clipToModelUrl}
+                          disabled={!isLoaded || clipTargetOptions.length === 0}
+                          onChange={(event) =>
+                            updateLayerRenderSettings(model.url, {
+                              clipToModelUrl: event.target.value,
+                            })
+                          }
+                        >
+                          <option value="">None</option>
+                          {clipTargetOptions.map((targetModel) => (
+                            <option
+                              key={targetModel.url}
+                              value={targetModel.url}
+                            >
+                              {targetModel.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
                   </div>
                 </div>
               );
@@ -1017,59 +1113,51 @@ export function Live2DViewerClient({
         </header>
 
         <div className="viewer-frame">
-          {loadedModels.map((model) => {
-            const isVisible = visibleUrls.has(model.url);
-            const isInteractive = isVisible && model.url === selectedUrl;
+          {loadedModels.length > 0 ? (
+            <Live2DViewerDynamic
+              width={width}
+              height={height}
+              fitToContainer
+              selectedModelUrl={selectedUrl}
+              models={loadedModels.map((model) => {
+                const layerRenderSettings = getLayerRenderSettings(model.url);
 
-            return (
-              <div
-                className={`viewer-layer${isVisible ? "" : " hidden"}${
-                  isInteractive ? " interactive" : ""
-                }`}
-                key={model.url}
-                aria-hidden={!isVisible}
-              >
-                <Live2DViewerDynamic
-                  modelUrl={model.url}
-                  width={width}
-                  height={height}
-                  fitToContainer
-                  viewTransformRef={getViewTransformRef(model.url)}
-                  onViewTransformChanged={(transform) =>
-                    updateViewTransform(model.url, transform)
-                  }
-                  parameterValuesRef={getParameterValuesRef(model.url)}
-                  motionRequest={motionRequestByUrl[model.url] ?? null}
-                  expressionRequest={expressionRequestByUrl[model.url] ?? null}
-                  parameterUpdateFps={parameterUpdateFps}
-                  onParametersLoaded={(loadedParameters) =>
-                    handleParametersLoaded(model.url, loadedParameters)
-                  }
-                  onParameterValuesChanged={(values) =>
+                return {
+                  modelUrl: model.url,
+                  visible: visibleUrls.has(model.url),
+                  interactive: model.url === selectedUrl,
+                  blendMode: layerRenderSettings.blendMode,
+                  clipToModelUrl: layerRenderSettings.clipToModelUrl || null,
+                  viewTransformRef: getViewTransformRef(model.url),
+                  onViewTransformChanged: (transform) =>
+                    updateViewTransform(model.url, transform),
+                  parameterValuesRef: getParameterValuesRef(model.url),
+                  motionRequest: motionRequestByUrl[model.url] ?? null,
+                  expressionRequest: expressionRequestByUrl[model.url] ?? null,
+                  parameterUpdateFps,
+                  onParametersLoaded: (loadedParameters) =>
+                    handleParametersLoaded(model.url, loadedParameters),
+                  onParameterValuesChanged: (values) =>
                     setLiveParameterValuesByUrl((current) => ({
                       ...current,
                       [model.url]: values,
-                    }))
-                  }
-                  onMotionsLoaded={(loadedMotions) =>
+                    })),
+                  onMotionsLoaded: (loadedMotions) =>
                     setMotionsByUrl((current) => ({
                       ...current,
                       [model.url]: loadedMotions,
-                    }))
-                  }
-                  onExpressionsLoaded={(loadedExpressions) =>
+                    })),
+                  onExpressionsLoaded: (loadedExpressions) =>
                     setExpressionsByUrl((current) => ({
                       ...current,
                       [model.url]: loadedExpressions,
-                    }))
-                  }
-                />
-              </div>
-            );
-          })}
-          {loadedModels.length === 0 ? (
+                    })),
+                };
+              })}
+            />
+          ) : (
             <p className="empty-copy">Load a model to show it on the stage.</p>
-          ) : null}
+          )}
         </div>
       </div>
 
@@ -1210,6 +1298,67 @@ export function Live2DViewerClient({
                     }. First model in each group drives the rest.`
                   : "Enter groups like A=B=C. The first model drives the rest."}
               </p>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="inspector-card">
+          <button
+            className="card-toggle"
+            type="button"
+            aria-expanded={expandedCards.layer}
+            onClick={() => toggleCard("layer")}
+          >
+            <span>Layer</span>
+            <span className="card-meta">
+              {visibleUrls.has(selectedUrl) ? "visible" : "hidden"}
+            </span>
+          </button>
+
+          {expandedCards.layer ? (
+            <div className="card-body">
+              <label className="search-field">
+                <span>Blend mode</span>
+                <select
+                  value={selectedLayerRenderSettings.blendMode}
+                  disabled={!loadedUrls.has(selectedUrl)}
+                  onChange={(event) =>
+                    updateLayerRenderSettings(selectedUrl, {
+                      blendMode: event.target.value as Live2DBlendMode,
+                    })
+                  }
+                >
+                  {BLEND_MODE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="search-field">
+                <span>Clip to</span>
+                <select
+                  value={selectedLayerRenderSettings.clipToModelUrl}
+                  disabled={
+                    !loadedUrls.has(selectedUrl) || loadedModels.length < 2
+                  }
+                  onChange={(event) =>
+                    updateLayerRenderSettings(selectedUrl, {
+                      clipToModelUrl: event.target.value,
+                    })
+                  }
+                >
+                  <option value="">None</option>
+                  {loadedModels
+                    .filter((model) => model.url !== selectedUrl)
+                    .map((model) => (
+                      <option key={model.url} value={model.url}>
+                        {model.label}
+                      </option>
+                    ))}
+                </select>
+              </label>
             </div>
           ) : null}
         </div>
