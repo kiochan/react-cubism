@@ -22,6 +22,7 @@ export interface Live2DViewerProps {
   parameterValuesRef?: MutableRefObject<Record<string, number>>;
   motionRequest?: Live2DMotionRequest | null;
   expressionRequest?: Live2DExpressionRequest | null;
+  effectSettings?: Live2DEffectSettings;
   parameterUpdateFps?: number;
   onParametersLoaded?: (parameters: Live2DParameter[]) => void;
   onParameterValuesChanged?: (values: Record<string, number>) => void;
@@ -45,6 +46,14 @@ export interface Live2DMultiViewerProps {
   height?: number;
   fitToContainer?: boolean;
   selectedModelUrl?: string;
+}
+
+export interface Live2DEffectSettings {
+  idle?: boolean;
+  eyeBlink?: boolean;
+  breath?: boolean;
+  physics?: boolean;
+  pose?: boolean;
 }
 
 export interface Live2DViewTransform {
@@ -88,6 +97,14 @@ const CUBISM_CORE_SCRIPT_SRC = "/live2dcubism/Core/live2dcubismcore.min.js";
 const CUBISM_SHADER_DIR = "/live2dcubism/Framework/Shaders/WebGL/";
 const scriptPromises = new Map<string, Promise<void>>();
 let frameworkStarted = false;
+const ignoreMotionEvent = () => undefined;
+const DEFAULT_EFFECT_SETTINGS: Required<Live2DEffectSettings> = {
+  idle: false,
+  eyeBlink: false,
+  breath: false,
+  physics: false,
+  pose: false,
+};
 
 interface ModelSettings {
   FileReferences?: {
@@ -516,7 +533,10 @@ function getLive2DParameters(
 }
 
 function resolveResource(base: string, path?: string) {
-  return path ? base + path : null;
+  if (!path) return null;
+  if (/^(?:https?:|blob:|data:|\/)/.test(path)) return path;
+
+  return base + path;
 }
 
 function getParameterIdsByGroup(
@@ -593,6 +613,7 @@ export function Live2DViewer({
   parameterValuesRef: externalParameterValuesRef,
   motionRequest,
   expressionRequest,
+  effectSettings,
   parameterUpdateFps = 10,
   onParametersLoaded,
   onParameterValuesChanged,
@@ -614,6 +635,7 @@ export function Live2DViewer({
   const onExpressionsLoadedRef = useRef(onExpressionsLoaded);
   const motionRequestRef = useRef(motionRequest);
   const expressionRequestRef = useRef(expressionRequest);
+  const effectSettingsRef = useRef(effectSettings);
   const parameterUpdateFpsRef = useRef(parameterUpdateFps);
   const internalViewTransformRef = useRef<Live2DViewTransform>(
     viewTransform ?? { panX: 0, panY: 0, zoom: 1 }
@@ -663,6 +685,10 @@ export function Live2DViewer({
   useEffect(() => {
     expressionRequestRef.current = expressionRequest;
   }, [expressionRequest]);
+
+  useEffect(() => {
+    effectSettingsRef.current = effectSettings;
+  }, [effectSettings]);
 
   useEffect(() => {
     parameterUpdateFpsRef.current = parameterUpdateFps;
@@ -768,7 +794,8 @@ export function Live2DViewer({
     let lastParameterReportTime = 0;
     let lastMotionNonce = motionRequestRef.current?.nonce ?? 0;
     let lastExpressionNonce = expressionRequestRef.current?.nonce ?? 0;
-    let idleRestartPending = false;
+      let idleRestartPending = false;
+      let wasIdleEnabled = true;
     let motionEyeBlinkIds: any[] = [];
     let motionLipSyncIds: any[] = [];
     const parameterIndices = new Map<string, number>();
@@ -849,15 +876,15 @@ export function Live2DViewer({
         }
       }
 
-      const mocPath = settings.FileReferences?.Moc;
-      if (!mocPath) {
+      const mocUrl = resolveResource(base, settings.FileReferences?.Moc);
+      if (!mocUrl) {
         console.error("[Live2DViewer] Model settings is missing the Moc path.");
         return;
       }
 
       try {
-        const res = await fetch(base + mocPath);
-        if (!res.ok) throw new Error(`HTTP ${res.status}: ${mocPath}`);
+        const res = await fetch(mocUrl);
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${mocUrl}`);
         const mocBuffer = await res.arrayBuffer();
         cubismMoc = CubismMoc.create(mocBuffer, true);
         cubismModel = cubismMoc?.createModel() ?? null;
@@ -875,9 +902,10 @@ export function Live2DViewer({
         getLive2DParameters(cubismModel, parameterNames)
       );
       motionManager = new CubismMotionManager();
+      motionManager.setEventCallback(ignoreMotionEvent);
       expressionManager = new CubismExpressionMotionManager();
+      expressionManager.setEventCallback(ignoreMotionEvent);
       breath = createBreath(modules, cubismModel);
-
       const eyeBlinkIds = getParameterIdsByGroup(settings, "EyeBlink").filter(
         (id) => hasParameterId(cubismModel, id)
       );
@@ -998,7 +1026,7 @@ export function Live2DViewer({
       const idleMotion = Array.from(motionDefinitions.values()).find((motion) =>
         motion.group.toLowerCase().includes("idle")
       );
-      if (idleMotion) {
+      if (idleMotion && (effectSettingsRef.current?.idle ?? true)) {
         await startMotion(idleMotion.group, idleMotion.index, true);
       }
       cubismModel.saveParameters();
@@ -1019,7 +1047,7 @@ export function Live2DViewer({
       try {
         const images = await Promise.all(
           (settings.FileReferences?.Textures ?? []).map((texturePath) =>
-            loadImage(base + texturePath)
+            loadImage(resolveResource(base, texturePath) ?? "")
           )
         );
         textures = images.map((image) => createTexture(glContext!, image));
@@ -1050,6 +1078,10 @@ export function Live2DViewer({
         const now = performance.now();
         const deltaTimeSeconds = Math.min((now - lastFrameTime) / 1000, 0.1);
         lastFrameTime = now;
+        const effects = {
+          ...DEFAULT_EFFECT_SETTINGS,
+          ...effectSettingsRef.current,
+        };
 
         const requestedMotion = motionRequestRef.current;
         if (requestedMotion && requestedMotion.nonce !== lastMotionNonce) {
@@ -1067,16 +1099,34 @@ export function Live2DViewer({
 
         cubismModel.loadParameters();
         motionManager?.updateMotion(cubismModel, deltaTimeSeconds);
-        if (idleMotion && motionManager?.isFinished() && !idleRestartPending) {
+        if (!effects.idle && wasIdleEnabled) {
+          motionManager?.stopAllMotions();
+          idleRestartPending = false;
+        }
+        wasIdleEnabled = effects.idle;
+        if (
+          effects.idle &&
+          idleMotion &&
+          motionManager?.isFinished() &&
+          !idleRestartPending
+        ) {
           idleRestartPending = true;
           void startMotion(idleMotion.group, idleMotion.index, true);
         }
         cubismModel.saveParameters();
-        eyeBlink?.updateParameters(cubismModel, deltaTimeSeconds);
+        if (effects.eyeBlink) {
+          eyeBlink?.updateParameters(cubismModel, deltaTimeSeconds);
+        }
         expressionManager?.updateMotion(cubismModel, deltaTimeSeconds);
-        breath?.updateParameters(cubismModel, deltaTimeSeconds);
-        physics?.evaluate(cubismModel, deltaTimeSeconds);
-        pose?.updateParameters(cubismModel, deltaTimeSeconds);
+        if (effects.breath) {
+          breath?.updateParameters(cubismModel, deltaTimeSeconds);
+        }
+        if (effects.physics) {
+          physics?.evaluate(cubismModel, deltaTimeSeconds);
+        }
+        if (effects.pose) {
+          pose?.updateParameters(cubismModel, deltaTimeSeconds);
+        }
         Object.entries(parameterValuesRef.current).forEach(([id, value]) => {
           const index = parameterIndices.get(id);
           if (index === undefined) return;
@@ -1385,6 +1435,7 @@ export function Live2DMultiViewer({
       lastMotionNonce: number;
       lastExpressionNonce: number;
       idleRestartPending: boolean;
+      wasIdleEnabled: boolean;
       idleMotion?: { group: string; index: number };
       settings: ModelSettings;
       startMotion: (group: string, index: number, loop: boolean) => Promise<void>;
@@ -1495,8 +1546,8 @@ export function Live2DMultiViewer({
           }
         }
 
-        const mocPath = settings.FileReferences?.Moc;
-        if (!mocPath) {
+        const mocUrl = resolveResource(base, settings.FileReferences?.Moc);
+        if (!mocUrl) {
           console.error("[Live2DMultiViewer] Model settings is missing the Moc path.");
           return null;
         }
@@ -1510,8 +1561,8 @@ export function Live2DMultiViewer({
           | null = null;
         let cubismModel: any = null;
         try {
-          const res = await fetch(base + mocPath);
-          if (!res.ok) throw new Error(`HTTP ${res.status}: ${mocPath}`);
+          const res = await fetch(mocUrl);
+          if (!res.ok) throw new Error(`HTTP ${res.status}: ${mocUrl}`);
           const mocBuffer = await res.arrayBuffer();
           cubismMoc = CubismMoc.create(mocBuffer, true);
           cubismModel = cubismMoc?.createModel() ?? null;
@@ -1535,8 +1586,9 @@ export function Live2DMultiViewer({
 
         const motionManager = new CubismMotionManager();
         const expressionManager = new CubismExpressionMotionManager();
+        motionManager.setEventCallback(ignoreMotionEvent);
+        expressionManager.setEventCallback(ignoreMotionEvent);
         const breath = createBreath(modules, cubismModel);
-
         const eyeBlinkIds = getParameterIdsByGroup(settings, "EyeBlink").filter(
           (id) => hasParameterId(cubismModel, id)
         );
@@ -1649,6 +1701,7 @@ export function Live2DMultiViewer({
           lastExpressionNonce:
             modelRefs.current.get(modelUrl)?.expressionRequest?.nonce ?? 0,
           idleRestartPending: false,
+          wasIdleEnabled: true,
           settings,
           startMotion: async (group, index, loop) => {
             const definition = motionDefinitions.get(`${group}:${index}`);
@@ -1699,14 +1752,20 @@ export function Live2DMultiViewer({
             group: idleMotion.group,
             index: idleMotion.index,
           };
-          await runtimeLayer.startMotion(idleMotion.group, idleMotion.index, true);
+          if (modelRefs.current.get(modelUrl)?.effectSettings?.idle ?? true) {
+            await runtimeLayer.startMotion(
+              idleMotion.group,
+              idleMotion.index,
+              true
+            );
+          }
         }
         cubismModel.saveParameters();
 
         try {
           const images = await Promise.all(
             (settings.FileReferences?.Textures ?? []).map((texturePath) =>
-              loadImage(base + texturePath)
+              loadImage(resolveResource(base, texturePath) ?? "")
             )
           );
           runtimeLayer.textures = images.map((image) => createTexture(gl, image));
@@ -1802,13 +1861,23 @@ export function Live2DMultiViewer({
             layer.lastExpressionNonce = requestedExpression.nonce;
             void layer.startExpression(requestedExpression.index);
           }
+          const effects = {
+            ...DEFAULT_EFFECT_SETTINGS,
+            ...config.effectSettings,
+          };
 
           layer.cubismModel.loadParameters();
           layer.motionManager?.updateMotion(
             layer.cubismModel,
             deltaTimeSeconds
           );
+          if (!effects.idle && layer.wasIdleEnabled) {
+            layer.motionManager?.stopAllMotions();
+            layer.idleRestartPending = false;
+          }
+          layer.wasIdleEnabled = effects.idle;
           if (
+            effects.idle &&
             layer.idleMotion &&
             layer.motionManager?.isFinished() &&
             !layer.idleRestartPending
@@ -1821,17 +1890,28 @@ export function Live2DMultiViewer({
             );
           }
           layer.cubismModel.saveParameters();
-          layer.eyeBlink?.updateParameters(
-            layer.cubismModel,
-            deltaTimeSeconds
-          );
+          if (effects.eyeBlink) {
+            layer.eyeBlink?.updateParameters(
+              layer.cubismModel,
+              deltaTimeSeconds
+            );
+          }
           layer.expressionManager?.updateMotion(
             layer.cubismModel,
             deltaTimeSeconds
           );
-          layer.breath?.updateParameters(layer.cubismModel, deltaTimeSeconds);
-          layer.physics?.evaluate(layer.cubismModel, deltaTimeSeconds);
-          layer.pose?.updateParameters(layer.cubismModel, deltaTimeSeconds);
+          if (effects.breath) {
+            layer.breath?.updateParameters(
+              layer.cubismModel,
+              deltaTimeSeconds
+            );
+          }
+          if (effects.physics) {
+            layer.physics?.evaluate(layer.cubismModel, deltaTimeSeconds);
+          }
+          if (effects.pose) {
+            layer.pose?.updateParameters(layer.cubismModel, deltaTimeSeconds);
+          }
 
           Object.entries(config.parameterValuesRef.current).forEach(
             ([id, value]) => {

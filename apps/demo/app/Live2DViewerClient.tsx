@@ -11,6 +11,7 @@ import {
 } from "react";
 import type {
   Live2DBlendMode,
+  Live2DEffectSettings,
   Live2DExpressionOption,
   Live2DExpressionRequest,
   Live2DMotionOption,
@@ -29,7 +30,7 @@ const Live2DViewerDynamic = dynamic(
 export interface ModelOption {
   label: string;
   url: string;
-  source: "models" | "samples";
+  source: "models" | "samples" | "local";
 }
 
 interface Props {
@@ -52,6 +53,9 @@ const DEFAULT_VIEW_TRANSFORM: Live2DViewTransform = {
   panY: 0,
   zoom: 1,
 };
+const DEFAULT_INSPECTOR_WIDTH = 324;
+const MIN_INSPECTOR_WIDTH = 280;
+const MAX_INSPECTOR_WIDTH = 560;
 
 const BLEND_MODE_OPTIONS: Array<{ label: string; value: Live2DBlendMode }> = [
   { label: "Normal", value: "normal" },
@@ -62,11 +66,23 @@ const INSPECTOR_CARD_LABELS = {
   parameterSync: "Parameter-Sync",
   positionSync: "Position-Sync",
   layer: "Layer Mode",
+  effects: "Effects",
   parameters: "Parameters",
+  motions: "Motions",
+  expressions: "Expressions",
   position: "Position",
 } as const;
 
 type InspectorCardId = keyof typeof INSPECTOR_CARD_LABELS;
+
+const INSPECTOR_PANEL_OPTIONS = [
+  { id: "globalSync", label: "Global Sync Settings" },
+  { id: "layer", label: "Layer Settings" },
+  { id: "modelControls", label: "Model Controls" },
+  { id: "parameters", label: "Parameters" },
+] as const;
+
+type InspectorPanelId = (typeof INSPECTOR_PANEL_OPTIONS)[number]["id"];
 
 interface ParameterSyncRule {
   id: string;
@@ -89,6 +105,71 @@ interface PositionSyncState {
 interface LayerRenderSettings {
   blendMode: Live2DBlendMode;
   clipToModelUrl: string;
+}
+
+const DEFAULT_EFFECT_SETTINGS: Required<Live2DEffectSettings> = {
+  idle: false,
+  eyeBlink: false,
+  breath: false,
+  physics: false,
+  pose: false,
+};
+
+const EFFECT_OPTIONS: Array<{
+  key: keyof Required<Live2DEffectSettings>;
+  label: string;
+  description: string;
+}> = [
+  {
+    key: "idle",
+    label: "Idle",
+    description: "Auto-loop standby motions",
+  },
+  {
+    key: "eyeBlink",
+    label: "EyeBlink",
+    description: "Model group driven blinking",
+  },
+  {
+    key: "breath",
+    label: "Breath",
+    description: "Extra breathing parameter motion",
+  },
+  {
+    key: "physics",
+    label: "Physics",
+    description: "Hair, cloth, and accessory dynamics",
+  },
+  {
+    key: "pose",
+    label: "Pose",
+    description: "Part visibility and pose links",
+  },
+];
+
+interface LocalModelOption extends ModelOption {
+  objectUrls: string[];
+}
+
+type ModelSettingsFileReferences = {
+  Moc?: string;
+  Textures?: string[];
+  Physics?: string;
+  Pose?: string;
+  DisplayInfo?: string;
+  Expressions?: Array<{
+    File?: string;
+  }>;
+  Motions?: Record<
+    string,
+    Array<{
+      File?: string;
+    }>
+  >;
+};
+
+interface LocalModelSettings {
+  FileReferences?: ModelSettingsFileReferences;
 }
 
 interface ParameterMappingRule {
@@ -168,6 +249,103 @@ function resolveModelUrl(
   });
 
   return match?.url ?? fallbackUrl;
+}
+
+function normalizeLocalPath(path: string) {
+  return path.replace(/\\/g, "/").replace(/^\.?\//, "");
+}
+
+function dirname(path: string) {
+  const normalizedPath = normalizeLocalPath(path);
+  const slashIndex = normalizedPath.lastIndexOf("/");
+
+  return slashIndex === -1 ? "" : normalizedPath.slice(0, slashIndex);
+}
+
+function joinLocalPath(basePath: string, resourcePath: string) {
+  const parts = [...basePath.split("/"), ...resourcePath.split("/")];
+  const normalizedParts: string[] = [];
+
+  parts.forEach((part) => {
+    if (!part || part === ".") return;
+    if (part === "..") {
+      normalizedParts.pop();
+      return;
+    }
+    normalizedParts.push(part);
+  });
+
+  return normalizedParts.join("/");
+}
+
+function isRemoteOrBlobUrl(value: string) {
+  return /^(?:https?:|blob:|data:|\/)/.test(value);
+}
+
+function resolveLocalObjectUrl(
+  fileUrls: Map<string, string>,
+  modelDir: string,
+  resourcePath: string | undefined
+) {
+  if (!resourcePath || isRemoteOrBlobUrl(resourcePath)) return resourcePath;
+
+  const normalizedResourcePath = normalizeLocalPath(resourcePath);
+  const localPath = joinLocalPath(modelDir, normalizedResourcePath);
+  const basename = normalizedResourcePath.split("/").pop() ?? "";
+
+  return (
+    fileUrls.get(localPath) ??
+    fileUrls.get(normalizedResourcePath) ??
+    Array.from(fileUrls.entries()).find(([path]) => path.endsWith(`/${basename}`))
+      ?.[1] ??
+    resourcePath
+  );
+}
+
+function rewriteLocalResource(
+  fileUrls: Map<string, string>,
+  modelDir: string,
+  resourcePath: string | undefined
+) {
+  return resolveLocalObjectUrl(fileUrls, modelDir, resourcePath);
+}
+
+function rewriteLocalModelSettings(
+  settings: LocalModelSettings,
+  fileUrls: Map<string, string>,
+  modelDir: string
+) {
+  const refs = settings.FileReferences;
+  if (!refs) return settings;
+
+  return {
+    ...settings,
+    FileReferences: {
+      ...refs,
+      Moc: rewriteLocalResource(fileUrls, modelDir, refs.Moc),
+      Textures: refs.Textures?.map((texture) =>
+        rewriteLocalResource(fileUrls, modelDir, texture) ?? texture
+      ),
+      Physics: rewriteLocalResource(fileUrls, modelDir, refs.Physics),
+      Pose: rewriteLocalResource(fileUrls, modelDir, refs.Pose),
+      DisplayInfo: rewriteLocalResource(fileUrls, modelDir, refs.DisplayInfo),
+      Expressions: refs.Expressions?.map((expression) => ({
+        ...expression,
+        File: rewriteLocalResource(fileUrls, modelDir, expression.File),
+      })),
+      Motions: refs.Motions
+        ? Object.fromEntries(
+            Object.entries(refs.Motions).map(([group, motions]) => [
+              group,
+              motions.map((motion) => ({
+                ...motion,
+                File: rewriteLocalResource(fileUrls, modelDir, motion.File),
+              })),
+            ])
+          )
+        : refs.Motions,
+    },
+  };
 }
 
 function parsePositionSyncGroups(
@@ -292,6 +470,10 @@ function clampViewTransform(transform: Live2DViewTransform) {
   };
 }
 
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
 function createParameterSyncRule(
   id: string,
   sourceUrl: string,
@@ -406,12 +588,20 @@ export function Live2DViewerClient({
   width = 400,
   height = 600,
 }: Props) {
-  const options = useMemo<ModelOption[]>(
+  const catalogOptions = useMemo<ModelOption[]>(
     () =>
       models.length > 0
         ? models
         : [{ label: modelUrl, url: modelUrl, source: "models" }],
     [modelUrl, models]
+  );
+  const [localModels, setLocalModels] = useState<LocalModelOption[]>([]);
+  const [localOpenStatus, setLocalOpenStatus] = useState("");
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const options = useMemo<ModelOption[]>(
+    () => [...catalogOptions, ...localModels],
+    [catalogOptions, localModels]
   );
   const [selectedUrl, setSelectedUrl] = useState(modelUrl);
   const [loadedUrls, setLoadedUrls] = useState<Set<string>>(() => new Set());
@@ -451,6 +641,9 @@ export function Live2DViewerClient({
   const [layerRenderSettingsByUrl, setLayerRenderSettingsByUrl] = useState<
     Record<string, LayerRenderSettings>
   >({});
+  const [effectSettingsByUrl, setEffectSettingsByUrl] = useState<
+    Record<string, Required<Live2DEffectSettings>>
+  >({});
   const [parameterSyncRules, setParameterSyncRules] = useState<
     ParameterSyncRule[]
   >(() => [
@@ -464,7 +657,10 @@ export function Live2DViewerClient({
     parameterSync: true,
     positionSync: true,
     layer: true,
+    effects: true,
     parameters: true,
+    motions: true,
+    expressions: true,
     position: true,
   });
   const [visibleCards, setVisibleCards] = useState<
@@ -473,10 +669,18 @@ export function Live2DViewerClient({
     parameterSync: true,
     positionSync: true,
     layer: true,
+    effects: true,
     parameters: true,
+    motions: true,
+    expressions: true,
     position: true,
   });
   const [resetVersion, setResetVersion] = useState(0);
+  const [inspectorWidth, setInspectorWidth] = useState(
+    DEFAULT_INSPECTOR_WIDTH
+  );
+  const [activeInspectorPanel, setActiveInspectorPanel] =
+    useState<InspectorPanelId>("globalSync");
   const parameterValuesRefs = useRef<
     Record<string, React.MutableRefObject<Record<string, number>>>
   >({});
@@ -484,6 +688,7 @@ export function Live2DViewerClient({
     Record<string, React.MutableRefObject<Live2DViewTransform>>
   >({});
   const lastSyncedParametersRef = useRef<Record<string, SyncedParameters[]>>({});
+  const localModelsRef = useRef<LocalModelOption[]>([]);
   const selectedModel =
     options.find((model) => model.url === selectedUrl) ?? options[0];
   const selectedParameterValuesRef =
@@ -494,6 +699,7 @@ export function Live2DViewerClient({
   const selectedViewTransform =
     viewTransformsByUrl[selectedUrl] ?? DEFAULT_VIEW_TRANSFORM;
   const selectedLayerRenderSettings = getLayerRenderSettings(selectedUrl);
+  const selectedEffectSettings = getEffectSettings(selectedUrl);
   const motions = motionsByUrl[selectedUrl] ?? [];
   const expressions = expressionsByUrl[selectedUrl] ?? [];
   const modelsByUrl = useMemo(
@@ -516,7 +722,7 @@ export function Live2DViewerClient({
       ...counts,
       [model.source]: counts[model.source] + 1,
     }),
-    { models: 0, samples: 0 }
+    { local: 0, models: 0, samples: 0 }
   );
   const filteredParameters = useMemo(() => {
     const query = parameterFilter.trim().toLowerCase();
@@ -584,6 +790,24 @@ export function Live2DViewerClient({
   }, [positionSync.enabled, positionSyncGroups]);
 
   useEffect(() => {
+    localModelsRef.current = localModels;
+  }, [localModels]);
+
+  useEffect(
+    () => () => {
+      localModelsRef.current.forEach((model) => {
+        model.objectUrls.forEach((url) => URL.revokeObjectURL(url));
+      });
+    },
+    []
+  );
+
+  useEffect(() => {
+    folderInputRef.current?.setAttribute("webkitdirectory", "");
+    folderInputRef.current?.setAttribute("directory", "");
+  }, []);
+
+  useEffect(() => {
     const validUrls = new Set(options.map((model) => model.url));
     setLoadedUrls((current) => {
       return new Set(Array.from(current).filter((url) => validUrls.has(url)));
@@ -642,6 +866,11 @@ export function Live2DViewerClient({
           ])
       )
     );
+    setEffectSettingsByUrl((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([url]) => validUrls.has(url))
+      )
+    );
   }, [options, selectedUrl]);
 
   const getParameterValuesRef = (url: string) => {
@@ -658,6 +887,116 @@ export function Live2DViewerClient({
     const sourceUrl = positionSyncSourceByUrl.get(url);
 
     return getOwnViewTransformRef(sourceUrl ?? url);
+  };
+  const clearLocalModels = () => {
+    const localUrls = new Set(localModels.map((model) => model.url));
+
+    localModels.forEach((model) => {
+      model.objectUrls.forEach((url) => URL.revokeObjectURL(url));
+    });
+    setLocalModels([]);
+    setLoadedUrls((current) => {
+      const next = new Set(current);
+      localUrls.forEach((url) => next.delete(url));
+      return next;
+    });
+    setVisibleUrls((current) => {
+      const next = new Set(current);
+      localUrls.forEach((url) => next.delete(url));
+      return next;
+    });
+    setLocalOpenStatus("");
+    if (localUrls.has(selectedUrl)) {
+      setSelectedUrl(catalogOptions[0]?.url ?? modelUrl);
+    }
+  };
+  const handleOpenLocalModels = async (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const selectedFiles = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (selectedFiles.length === 0) {
+      setLocalOpenStatus("No files selected.");
+      return;
+    }
+
+    const modelFiles = selectedFiles.filter((file) =>
+      file.name.toLowerCase().endsWith(".model3.json")
+    );
+    if (modelFiles.length === 0) {
+      setLocalOpenStatus("No .model3.json file found in that selection.");
+      return;
+    }
+    const hasDirectoryPaths = selectedFiles.some((file) =>
+      Boolean(file.webkitRelativePath)
+    );
+    if (!hasDirectoryPaths && selectedFiles.length === modelFiles.length) {
+      setLocalOpenStatus(
+        "Selected .model3.json only. Open the model folder so textures and .moc3 files are included."
+      );
+      return;
+    }
+
+    const importedModels: LocalModelOption[] = [];
+    const createdUrls: string[] = [];
+
+    try {
+      for (const modelFile of modelFiles) {
+        const fileUrls = new Map<string, string>();
+        const objectUrls: string[] = [];
+
+        selectedFiles.forEach((file) => {
+          const url = URL.createObjectURL(file);
+          const path = normalizeLocalPath(file.webkitRelativePath || file.name);
+          fileUrls.set(path, url);
+          objectUrls.push(url);
+          createdUrls.push(url);
+        });
+
+        const modelPath = normalizeLocalPath(
+          modelFile.webkitRelativePath || modelFile.name
+        );
+        const settings = JSON.parse(
+          await modelFile.text()
+        ) as LocalModelSettings;
+        const rewrittenSettings = rewriteLocalModelSettings(
+          settings,
+          fileUrls,
+          dirname(modelPath)
+        );
+        const modelSettingsUrl = URL.createObjectURL(
+          new Blob([JSON.stringify(rewrittenSettings)], {
+            type: "application/json",
+          })
+        );
+        objectUrls.push(modelSettingsUrl);
+        createdUrls.push(modelSettingsUrl);
+
+        importedModels.push({
+          label: `Local: ${modelFile.name.replace(/\.model3\.json$/i, "")}`,
+          source: "local",
+          url: modelSettingsUrl,
+          objectUrls,
+        });
+      }
+    } catch (error) {
+      createdUrls.forEach((url) => URL.revokeObjectURL(url));
+      setLocalOpenStatus(
+        error instanceof Error
+          ? `Unable to open local model: ${error.message}`
+          : "Unable to open local model."
+      );
+      return;
+    }
+
+    setLocalModels((current) => [...current, ...importedModels]);
+    setSelectedUrl(importedModels[0].url);
+    importedModels.forEach((model) => loadModel(model.url));
+    setLocalOpenStatus(
+      `${importedModels.length} local model${
+        importedModels.length === 1 ? "" : "s"
+      } ready.`
+    );
   };
   const loadModel = (url: string, show = true) => {
     setLoadedUrls((current) => new Set(current).add(url));
@@ -812,6 +1151,25 @@ export function Live2DViewerClient({
       },
     }));
   };
+  function getEffectSettings(url: string): Required<Live2DEffectSettings> {
+    return {
+      ...DEFAULT_EFFECT_SETTINGS,
+      ...effectSettingsByUrl[url],
+    };
+  }
+  const updateEffectSettings = (
+    url: string,
+    patch: Partial<Live2DEffectSettings>
+  ) => {
+    setEffectSettingsByUrl((current) => ({
+      ...current,
+      [url]: {
+        ...DEFAULT_EFFECT_SETTINGS,
+        ...current[url],
+        ...patch,
+      },
+    }));
+  };
   const clearLastSyncedParameters = useCallback(() => {
     Object.values(lastSyncedParametersRef.current).forEach((ruleTargets) => {
       ruleTargets.forEach((lastSynced) => {
@@ -873,6 +1231,32 @@ export function Live2DViewerClient({
         nonce: Date.now(),
       },
     }));
+  };
+  const startInspectorResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+
+    const updateWidth = (clientX: number) => {
+      setInspectorWidth(
+        clampNumber(
+          window.innerWidth - clientX,
+          MIN_INSPECTOR_WIDTH,
+          MAX_INSPECTOR_WIDTH
+        )
+      );
+    };
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      updateWidth(moveEvent.clientX);
+    };
+    const handlePointerUp = () => {
+      document.body.classList.remove("is-resizing-inspector");
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+
+    document.body.classList.add("is-resizing-inspector");
+    updateWidth(event.clientX);
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp, { once: true });
   };
 
   useEffect(() => {
@@ -961,7 +1345,12 @@ export function Live2DViewerClient({
   }, [positionSync.enabled, positionSyncGroups, viewTransformsByUrl]);
 
   return (
-    <section className="workspace">
+    <section
+      className="workspace"
+      style={
+        { "--inspector-width": `${inspectorWidth}px` } as React.CSSProperties
+      }
+    >
       <aside className="sidebar">
         <div className="sidebar-header">
           <div>
@@ -969,6 +1358,49 @@ export function Live2DViewerClient({
             <h1>Live2D Studio</h1>
           </div>
           <span className="status-dot" aria-label="Ready" />
+        </div>
+
+        <div className="local-model-import">
+          <input
+            ref={folderInputRef}
+            type="file"
+            multiple
+            className="sr-only"
+            onChange={handleOpenLocalModels}
+          />
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept=".json,.moc3,.png,.jpg,.jpeg,.webp,.motion3.json,.exp3.json,.physics3.json,.pose3.json"
+            className="sr-only"
+            onChange={handleOpenLocalModels}
+          />
+          <button
+            className="ghost-button"
+            type="button"
+            onClick={() => folderInputRef.current?.click()}
+          >
+            Open folder
+          </button>
+          <button
+            className="inline-action"
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            File
+          </button>
+          <button
+            className="inline-action"
+            type="button"
+            disabled={localModels.length === 0}
+            onClick={clearLocalModels}
+          >
+            Clear
+          </button>
+          {localOpenStatus ? (
+            <p className="local-open-status">{localOpenStatus}</p>
+          ) : null}
         </div>
 
         <div className="sidebar-section">
@@ -1051,7 +1483,11 @@ export function Live2DViewerClient({
                   >
                     <span className="model-name">{model.label}</span>
                     <span className="model-source">
-                      {model.source === "models" ? "Custom" : "SDK Sample"}
+                      {model.source === "local"
+                        ? "Browser Local"
+                        : model.source === "models"
+                          ? "Custom"
+                          : "SDK Sample"}
                     </span>
                   </button>
                   <div className="model-actions">
@@ -1122,6 +1558,10 @@ export function Live2DViewerClient({
 
         <div className="sidebar-footer">
           <div className="stat-card">
+            <span>Local</span>
+            <strong>{modelCounts.local}</strong>
+          </div>
+          <div className="stat-card">
             <span>Custom</span>
             <strong>{modelCounts.models}</strong>
           </div>
@@ -1165,6 +1605,7 @@ export function Live2DViewerClient({
                   parameterValuesRef: getParameterValuesRef(model.url),
                   motionRequest: motionRequestByUrl[model.url] ?? null,
                   expressionRequest: expressionRequestByUrl[model.url] ?? null,
+                  effectSettings: getEffectSettings(model.url),
                   parameterUpdateFps,
                   onParametersLoaded: (loadedParameters) =>
                     handleParametersLoaded(model.url, loadedParameters),
@@ -1192,6 +1633,14 @@ export function Live2DViewerClient({
         </div>
       </div>
 
+      <div
+        aria-label="Resize inspector"
+        aria-orientation="vertical"
+        className="inspector-resizer"
+        onPointerDown={startInspectorResize}
+        role="separator"
+      />
+
       <aside className="inspector">
         <div className="inspector-header">
           <div>
@@ -1216,6 +1665,29 @@ export function Live2DViewerClient({
             </div>
           </details>
         </div>
+
+        <div className="inspector-panel-tabs" role="tablist">
+          {INSPECTOR_PANEL_OPTIONS.map((panel) => (
+            <button
+              aria-selected={activeInspectorPanel === panel.id}
+              className={`inspector-panel-tab${
+                activeInspectorPanel === panel.id ? " active" : ""
+              }`}
+              key={panel.id}
+              onClick={() => setActiveInspectorPanel(panel.id)}
+              role="tab"
+              type="button"
+            >
+              {panel.label}
+            </button>
+          ))}
+        </div>
+
+        {activeInspectorPanel === "globalSync" ? (
+        <section className="inspector-section">
+          <div className="inspector-section-header">
+            <span>Global Sync Settings</span>
+          </div>
 
         {visibleCards.parameterSync ? (
           <div className="inspector-card">
@@ -1371,6 +1843,15 @@ export function Live2DViewerClient({
           </div>
         ) : null}
 
+        </section>
+        ) : null}
+
+        {activeInspectorPanel === "layer" ? (
+        <section className="inspector-section">
+          <div className="inspector-section-header">
+            <span>Layer Settings</span>
+          </div>
+
         {visibleCards.layer ? (
           <div className="inspector-card">
             <button
@@ -1433,6 +1914,225 @@ export function Live2DViewerClient({
             ) : null}
           </div>
         ) : null}
+
+        {visibleCards.position ? (
+          <div className="inspector-card">
+            <button
+              className="card-toggle"
+              type="button"
+              aria-expanded={expandedCards.position}
+              onClick={() => toggleCard("position")}
+            >
+              <span>Position</span>
+              <span className="card-meta">
+                {selectedViewTransform.zoom.toFixed(2)}x
+              </span>
+            </button>
+
+            {expandedCards.position ? (
+              <div className="card-body">
+                <div className="position-grid">
+                  <label className="number-field">
+                    <span>X</span>
+                    <input
+                      step={0.01}
+                      type="number"
+                      value={selectedViewTransform.panX}
+                      onChange={(event) =>
+                        updateSelectedViewTransform({
+                          panX: Number(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+
+                  <label className="number-field">
+                    <span>Y</span>
+                    <input
+                      step={0.01}
+                      type="number"
+                      value={selectedViewTransform.panY}
+                      onChange={(event) =>
+                        updateSelectedViewTransform({
+                          panY: Number(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+
+                  <label className="number-field">
+                    <span>Zoom</span>
+                    <input
+                      min={0.01}
+                      step={0.01}
+                      type="number"
+                      value={selectedViewTransform.zoom}
+                      onChange={(event) =>
+                        updateSelectedViewTransform({
+                          zoom: Number(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+
+                <button
+                  className="ghost-button"
+                  type="button"
+                  onClick={resetSelectedViewTransform}
+                >
+                  Reset Position
+                </button>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        </section>
+        ) : null}
+
+        {activeInspectorPanel === "modelControls" ? (
+        <section className="inspector-section">
+          <div className="inspector-section-header">
+            <span>Model Controls</span>
+          </div>
+
+        {visibleCards.effects ? (
+          <div className="inspector-card">
+            <button
+              className="card-toggle"
+              type="button"
+              aria-expanded={expandedCards.effects}
+              onClick={() => toggleCard("effects")}
+            >
+              <span>Effects</span>
+              <span className="card-meta">
+                {
+                  EFFECT_OPTIONS.filter(
+                    (effect) => selectedEffectSettings[effect.key]
+                  ).length
+                }
+                /{EFFECT_OPTIONS.length}
+              </span>
+            </button>
+
+            {expandedCards.effects ? (
+              <div className="card-body">
+                <div className="effect-toggle-list">
+                  {EFFECT_OPTIONS.map((effect) => {
+                    const enabled = selectedEffectSettings[effect.key];
+
+                    return (
+                      <div className="effect-row" key={effect.key}>
+                        <div>
+                          <span className="effect-name">{effect.label}</span>
+                          <span className="effect-description">
+                            {effect.description}
+                          </span>
+                        </div>
+                        <button
+                          className={`switch-toggle${
+                            enabled ? " active" : ""
+                          }`}
+                          type="button"
+                          role="switch"
+                          aria-checked={enabled}
+                          onClick={() =>
+                            updateEffectSettings(selectedUrl, {
+                              [effect.key]: !enabled,
+                            })
+                          }
+                        >
+                          <span className="switch-track" aria-hidden="true" />
+                          <span className="switch-label">
+                            {enabled ? "On" : "Off"}
+                          </span>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {visibleCards.motions ? (
+          <div className="inspector-card">
+            <button
+              className="card-toggle"
+              type="button"
+              aria-expanded={expandedCards.motions}
+              onClick={() => toggleCard("motions")}
+            >
+              <span>Motions</span>
+              <span className="card-meta">{motions.length}</span>
+            </button>
+
+            {expandedCards.motions ? (
+              <div className="card-body animation-card-body">
+                <div className="pill-list">
+                  {motions.map((motion) => (
+                    <button
+                      className="pill-button"
+                      key={`${motion.group}:${motion.index}`}
+                      onClick={() => requestMotion(motion)}
+                      type="button"
+                    >
+                      {motion.name}
+                    </button>
+                  ))}
+                  {motions.length === 0 ? (
+                    <p className="empty-copy compact">No motions found.</p>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {visibleCards.expressions ? (
+          <div className="inspector-card">
+            <button
+              className="card-toggle"
+              type="button"
+              aria-expanded={expandedCards.expressions}
+              onClick={() => toggleCard("expressions")}
+            >
+              <span>Expressions</span>
+              <span className="card-meta">{expressions.length}</span>
+            </button>
+
+            {expandedCards.expressions ? (
+              <div className="card-body animation-card-body">
+                <div className="pill-list">
+                  {expressions.map((expression) => (
+                    <button
+                      className="pill-button"
+                      key={expression.index}
+                      onClick={() => requestExpression(expression)}
+                      type="button"
+                    >
+                      {expression.name}
+                    </button>
+                  ))}
+                  {expressions.length === 0 ? (
+                    <p className="empty-copy compact">No expressions found.</p>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        </section>
+        ) : null}
+
+        {activeInspectorPanel === "parameters" ? (
+        <section className="inspector-section">
+          <div className="inspector-section-header">
+            <span>Parameters</span>
+          </div>
 
         {visibleCards.parameters ? (
           <div
@@ -1513,126 +2213,12 @@ export function Live2DViewerClient({
                     <p className="empty-copy">No parameters match this search.</p>
                   ) : null}
                 </div>
-
-                <div className="animation-section">
-                  <div className="section-heading">
-                    <span>Motions</span>
-                    <span className="muted">{motions.length}</span>
-                  </div>
-                  <div className="pill-list">
-                    {motions.map((motion) => (
-                      <button
-                        className="pill-button"
-                        key={`${motion.group}:${motion.index}`}
-                        onClick={() => requestMotion(motion)}
-                        type="button"
-                      >
-                        {motion.name}
-                      </button>
-                    ))}
-                    {motions.length === 0 ? (
-                      <p className="empty-copy compact">No motions found.</p>
-                    ) : null}
-                  </div>
-                </div>
-
-                <div className="animation-section">
-                  <div className="section-heading">
-                    <span>Expressions</span>
-                    <span className="muted">{expressions.length}</span>
-                  </div>
-                  <div className="pill-list">
-                    {expressions.map((expression) => (
-                      <button
-                        className="pill-button"
-                        key={expression.index}
-                        onClick={() => requestExpression(expression)}
-                        type="button"
-                      >
-                        {expression.name}
-                      </button>
-                    ))}
-                    {expressions.length === 0 ? (
-                      <p className="empty-copy compact">No expressions found.</p>
-                    ) : null}
-                  </div>
-                </div>
               </div>
             ) : null}
           </div>
         ) : null}
 
-        {visibleCards.position ? (
-          <div className="inspector-card">
-            <button
-              className="card-toggle"
-              type="button"
-              aria-expanded={expandedCards.position}
-              onClick={() => toggleCard("position")}
-            >
-              <span>Position</span>
-              <span className="card-meta">
-                {selectedViewTransform.zoom.toFixed(2)}x
-              </span>
-            </button>
-
-            {expandedCards.position ? (
-              <div className="card-body">
-                <div className="position-grid">
-                  <label className="number-field">
-                    <span>X</span>
-                    <input
-                      step={0.01}
-                      type="number"
-                      value={selectedViewTransform.panX}
-                      onChange={(event) =>
-                        updateSelectedViewTransform({
-                          panX: Number(event.target.value),
-                        })
-                      }
-                    />
-                  </label>
-
-                  <label className="number-field">
-                    <span>Y</span>
-                    <input
-                      step={0.01}
-                      type="number"
-                      value={selectedViewTransform.panY}
-                      onChange={(event) =>
-                        updateSelectedViewTransform({
-                          panY: Number(event.target.value),
-                        })
-                      }
-                    />
-                  </label>
-
-                  <label className="number-field">
-                    <span>Zoom</span>
-                    <input
-                      min={0.01}
-                      step={0.01}
-                      type="number"
-                      value={selectedViewTransform.zoom}
-                      onChange={(event) =>
-                        updateSelectedViewTransform({
-                          zoom: Number(event.target.value),
-                        })
-                      }
-                    />
-                  </label>
-                </div>
-
-                <button
-                  className="ghost-button"
-                  type="button"
-                  onClick={resetSelectedViewTransform}
-                >
-                  Reset Position
-                </button>
-              </div>
-            ) : null}
-          </div>
+        </section>
         ) : null}
       </aside>
     </section>
