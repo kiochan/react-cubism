@@ -1,9 +1,12 @@
 export { Live2DMultiViewer, Live2DViewer } from "./Live2DViewer";
 export type {
   Live2DBlendMode,
+  Live2DBackgroundColor,
+  Live2DEffectSettings,
   Live2DExpressionOption,
   Live2DExpressionRequest,
   Live2DModelLayerProps,
+  Live2DModelDiagnostics,
   Live2DMotionOption,
   Live2DMotionRequest,
   Live2DMultiViewerProps,
