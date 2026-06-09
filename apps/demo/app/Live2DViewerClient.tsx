@@ -14,6 +14,7 @@ import type {
   Live2DEffectSettings,
   Live2DExpressionOption,
   Live2DExpressionRequest,
+  Live2DModelDiagnostics,
   Live2DMotionOption,
   Live2DMotionRequest,
   Live2DParameter,
@@ -32,6 +33,8 @@ export interface ModelOption {
   url: string;
   source: "models" | "samples" | "local";
 }
+
+type ModelSource = ModelOption["source"];
 
 interface Props {
   modelUrl: string;
@@ -60,6 +63,12 @@ const MAX_INSPECTOR_WIDTH = 560;
 const BLEND_MODE_OPTIONS: Array<{ label: string; value: Live2DBlendMode }> = [
   { label: "Normal", value: "normal" },
   { label: "Multiply", value: "multiply" },
+];
+
+const MODEL_SOURCE_OPTIONS: Array<{ label: string; source: ModelSource }> = [
+  { label: "Local", source: "local" },
+  { label: "Custom", source: "models" },
+  { label: "Samples", source: "samples" },
 ];
 
 const INSPECTOR_CARD_LABELS = {
@@ -147,8 +156,44 @@ const EFFECT_OPTIONS: Array<{
   },
 ];
 
+const LOCAL_MODEL_DB_NAME = "react-cubism-local-models";
+const LOCAL_MODEL_DB_VERSION = 1;
+const LOCAL_MODEL_STORE_NAME = "directories";
+
 interface LocalModelOption extends ModelOption {
   objectUrls: string[];
+  cacheId?: string;
+}
+
+interface LocalFileEntry {
+  file: File;
+  path: string;
+}
+
+interface LocalDirectoryHandle {
+  kind: "directory";
+  name: string;
+  entries(): AsyncIterableIterator<[string, LocalFileSystemHandle]>;
+  queryPermission?(options?: { mode: "read" }): Promise<PermissionState>;
+  requestPermission?(options?: { mode: "read" }): Promise<PermissionState>;
+}
+
+interface LocalFileHandle {
+  kind: "file";
+  name: string;
+  getFile(): Promise<File>;
+}
+
+type LocalFileSystemHandle = LocalDirectoryHandle | LocalFileHandle;
+
+interface CachedLocalDirectory {
+  id: string;
+  name: string;
+  handle: LocalDirectoryHandle;
+}
+
+interface WindowWithFileSystemAccess extends Window {
+  showDirectoryPicker?: () => Promise<LocalDirectoryHandle>;
 }
 
 type ModelSettingsFileReferences = {
@@ -296,7 +341,9 @@ function resolveLocalObjectUrl(
   return (
     fileUrls.get(localPath) ??
     fileUrls.get(normalizedResourcePath) ??
-    Array.from(fileUrls.entries()).find(([path]) => path.endsWith(`/${basename}`))
+    Array.from(fileUrls.entries()).find(
+      ([path]) => path === basename || path.endsWith(`/${basename}`)
+    )
       ?.[1] ??
     resourcePath
   );
@@ -474,6 +521,130 @@ function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+function hasIndexedDb() {
+  return typeof indexedDB !== "undefined";
+}
+
+function supportsFileSystemAccess() {
+  return Boolean(
+    typeof window !== "undefined" &&
+      (window as WindowWithFileSystemAccess).showDirectoryPicker
+  );
+}
+
+function openLocalModelDb() {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    if (!hasIndexedDb()) {
+      reject(new Error("IndexedDB is not available in this browser."));
+      return;
+    }
+
+    const request = indexedDB.open(
+      LOCAL_MODEL_DB_NAME,
+      LOCAL_MODEL_DB_VERSION
+    );
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(LOCAL_MODEL_STORE_NAME)) {
+        db.createObjectStore(LOCAL_MODEL_STORE_NAME, { keyPath: "id" });
+      }
+    };
+    request.onerror = () =>
+      reject(request.error ?? new Error("Unable to open local model cache."));
+    request.onsuccess = () => resolve(request.result);
+  });
+}
+
+function idbRequest<T>(request: IDBRequest<T>) {
+  return new Promise<T>((resolve, reject) => {
+    request.onerror = () =>
+      reject(request.error ?? new Error("Local model cache request failed."));
+    request.onsuccess = () => resolve(request.result);
+  });
+}
+
+async function readCachedLocalDirectories() {
+  const db = await openLocalModelDb();
+
+  try {
+    const transaction = db.transaction(LOCAL_MODEL_STORE_NAME, "readonly");
+    return await idbRequest<CachedLocalDirectory[]>(
+      transaction.objectStore(LOCAL_MODEL_STORE_NAME).getAll()
+    );
+  } finally {
+    db.close();
+  }
+}
+
+async function saveCachedLocalDirectory(directory: CachedLocalDirectory) {
+  const db = await openLocalModelDb();
+
+  try {
+    const transaction = db.transaction(LOCAL_MODEL_STORE_NAME, "readwrite");
+    await idbRequest(
+      transaction.objectStore(LOCAL_MODEL_STORE_NAME).put(directory)
+    );
+  } finally {
+    db.close();
+  }
+}
+
+async function deleteCachedLocalDirectory(id: string) {
+  const db = await openLocalModelDb();
+
+  try {
+    const transaction = db.transaction(LOCAL_MODEL_STORE_NAME, "readwrite");
+    await idbRequest(transaction.objectStore(LOCAL_MODEL_STORE_NAME).delete(id));
+  } finally {
+    db.close();
+  }
+}
+
+async function clearCachedLocalDirectories() {
+  const db = await openLocalModelDb();
+
+  try {
+    const transaction = db.transaction(LOCAL_MODEL_STORE_NAME, "readwrite");
+    await idbRequest(transaction.objectStore(LOCAL_MODEL_STORE_NAME).clear());
+  } finally {
+    db.close();
+  }
+}
+
+async function ensureDirectoryReadPermission(
+  handle: LocalDirectoryHandle,
+  requestPermission: boolean
+) {
+  const options = { mode: "read" as const };
+  const currentPermission = await handle.queryPermission?.(options);
+
+  if (currentPermission === "granted") return true;
+  if (!requestPermission) return false;
+
+  return (await handle.requestPermission?.(options)) === "granted";
+}
+
+async function readDirectoryFiles(
+  handle: LocalDirectoryHandle,
+  basePath = handle.name
+): Promise<LocalFileEntry[]> {
+  const entries: LocalFileEntry[] = [];
+
+  for await (const [name, childHandle] of handle.entries()) {
+    const path = normalizeLocalPath(`${basePath}/${name}`);
+
+    if (childHandle.kind === "file") {
+      entries.push({ file: await childHandle.getFile(), path });
+      continue;
+    }
+
+    entries.push(...(await readDirectoryFiles(childHandle, path)));
+  }
+
+  return entries;
+}
+
 function createParameterSyncRule(
   id: string,
   sourceUrl: string,
@@ -597,6 +768,14 @@ export function Live2DViewerClient({
   );
   const [localModels, setLocalModels] = useState<LocalModelOption[]>([]);
   const [localOpenStatus, setLocalOpenStatus] = useState("");
+  const [modelSearch, setModelSearch] = useState("");
+  const [enabledModelSources, setEnabledModelSources] = useState<
+    Record<ModelSource, boolean>
+  >({
+    local: true,
+    models: true,
+    samples: true,
+  });
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const options = useMemo<ModelOption[]>(
@@ -622,6 +801,9 @@ export function Live2DViewerClient({
   >({});
   const [expressionsByUrl, setExpressionsByUrl] = useState<
     Record<string, Live2DExpressionOption[]>
+  >({});
+  const [modelDiagnosticsByUrl, setModelDiagnosticsByUrl] = useState<
+    Record<string, Live2DModelDiagnostics>
   >({});
   const [motionRequestByUrl, setMotionRequestByUrl] = useState<
     Record<string, Live2DMotionRequest | null>
@@ -689,6 +871,7 @@ export function Live2DViewerClient({
   >({});
   const lastSyncedParametersRef = useRef<Record<string, SyncedParameters[]>>({});
   const localModelsRef = useRef<LocalModelOption[]>([]);
+  const restoredLocalCacheRef = useRef(false);
   const selectedModel =
     options.find((model) => model.url === selectedUrl) ?? options[0];
   const selectedParameterValuesRef =
@@ -709,7 +892,17 @@ export function Live2DViewerClient({
   const orderedOptions = layerOrder
     .map((url) => modelsByUrl.get(url))
     .filter((model): model is ModelOption => Boolean(model));
-  const displayOptions = [...orderedOptions].reverse();
+  const filteredOptions = useMemo(() => {
+    const query = modelSearch.trim().toLowerCase();
+
+    return orderedOptions.filter((model) => {
+      if (!enabledModelSources[model.source]) return false;
+      if (!query) return true;
+
+      return model.label.toLowerCase().includes(query);
+    });
+  }, [enabledModelSources, modelSearch, orderedOptions]);
+  const displayOptions = [...filteredOptions].reverse();
   const loadedModels = orderedOptions.filter((model) =>
     loadedUrls.has(model.url)
   );
@@ -717,6 +910,16 @@ export function Live2DViewerClient({
   const visibleLoadedModels = loadedModels.filter((model) =>
     visibleUrls.has(model.url)
   );
+  const diagnosticsModel = modelsByUrl.get(selectedUrl);
+  const selectedModelDiagnostics =
+    diagnosticsModel && loadedUrls.has(diagnosticsModel.url)
+      ? modelDiagnosticsByUrl[diagnosticsModel.url]
+      : undefined;
+  const selectedModelDiagnosticStatus = diagnosticsModel
+    ? loadedUrls.has(diagnosticsModel.url)
+      ? "waiting"
+      : "not loaded"
+    : "no model selected";
   const modelCounts = options.reduce(
     (counts, model) => ({
       ...counts,
@@ -808,6 +1011,12 @@ export function Live2DViewerClient({
   }, []);
 
   useEffect(() => {
+    if (restoredLocalCacheRef.current) return;
+    restoredLocalCacheRef.current = true;
+    void restoreCachedLocalModels(false);
+  }, []);
+
+  useEffect(() => {
     const validUrls = new Set(options.map((model) => model.url));
     setLoadedUrls((current) => {
       return new Set(Array.from(current).filter((url) => validUrls.has(url)));
@@ -871,6 +1080,11 @@ export function Live2DViewerClient({
         Object.entries(current).filter(([url]) => validUrls.has(url))
       )
     );
+    setModelDiagnosticsByUrl((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([url]) => validUrls.has(url))
+      )
+    );
   }, [options, selectedUrl]);
 
   const getParameterValuesRef = (url: string) => {
@@ -888,7 +1102,201 @@ export function Live2DViewerClient({
 
     return getOwnViewTransformRef(sourceUrl ?? url);
   };
-  const clearLocalModels = () => {
+  const selectModel = (url: string) => {
+    setSelectedUrl(url);
+    setParameterFilter("");
+  };
+  const loadModel = (url: string, show = true) => {
+    setLoadedUrls((current) => new Set(current).add(url));
+    if (show) setVisibleUrls((current) => new Set(current).add(url));
+  };
+  const importLocalFileEntries = async (
+    entries: LocalFileEntry[],
+    options: { cacheId?: string; statusPrefix?: string } = {}
+  ) => {
+    if (entries.length === 0) {
+      setLocalOpenStatus("No files selected.");
+      return 0;
+    }
+
+    const modelEntries = entries.filter((entry) =>
+      entry.file.name.toLowerCase().endsWith(".model3.json")
+    );
+    if (modelEntries.length === 0) {
+      setLocalOpenStatus("No .model3.json file found in that selection.");
+      return 0;
+    }
+
+    const hasDirectoryPaths = entries.some((entry) => entry.path.includes("/"));
+    if (!hasDirectoryPaths && entries.length === modelEntries.length) {
+      setLocalOpenStatus(
+        "Files mode needs .model3.json plus its .moc3, textures, and optional motion/expression files selected together. Use Open folder for one-click import."
+      );
+      return 0;
+    }
+
+    const importedModels: LocalModelOption[] = [];
+    const createdUrls: string[] = [];
+
+    try {
+      for (const modelEntry of modelEntries) {
+        const fileUrls = new Map<string, string>();
+        const objectUrls: string[] = [];
+
+        entries.forEach((entry) => {
+          const url = URL.createObjectURL(entry.file);
+          const path = normalizeLocalPath(entry.path);
+          fileUrls.set(path, url);
+          objectUrls.push(url);
+          createdUrls.push(url);
+        });
+
+        const modelPath = normalizeLocalPath(modelEntry.path);
+        const settings = JSON.parse(
+          await modelEntry.file.text()
+        ) as LocalModelSettings;
+        const rewrittenSettings = rewriteLocalModelSettings(
+          settings,
+          fileUrls,
+          dirname(modelPath)
+        );
+        const modelSettingsUrl = URL.createObjectURL(
+          new Blob([JSON.stringify(rewrittenSettings)], {
+            type: "application/json",
+          })
+        );
+        objectUrls.push(modelSettingsUrl);
+        createdUrls.push(modelSettingsUrl);
+
+        importedModels.push({
+          label: `Local: ${modelEntry.file.name.replace(
+            /\.model3\.json$/i,
+            ""
+          )}`,
+          source: "local",
+          url: modelSettingsUrl,
+          objectUrls,
+          cacheId: options.cacheId,
+        });
+      }
+    } catch (error) {
+      createdUrls.forEach((url) => URL.revokeObjectURL(url));
+      setLocalOpenStatus(
+        error instanceof Error
+          ? `Unable to open local model: ${error.message}`
+          : "Unable to open local model."
+      );
+      return 0;
+    }
+
+    setLocalModels((current) => [...current, ...importedModels]);
+    setSelectedUrl(importedModels[0].url);
+    importedModels.forEach((model) => loadModel(model.url));
+    setLocalOpenStatus(
+      `${options.statusPrefix ?? ""}${importedModels.length} local model${
+        importedModels.length === 1 ? "" : "s"
+      } ready.`
+    );
+    return importedModels.length;
+  };
+  const openLocalDirectory = async () => {
+    const picker = (window as WindowWithFileSystemAccess).showDirectoryPicker;
+
+    if (!picker) {
+      folderInputRef.current?.click();
+      return;
+    }
+
+    try {
+      const handle = await picker.call(window);
+      const id = `${handle.name}-${Date.now()}`;
+      const importedCount = await importLocalFileEntries(
+        await readDirectoryFiles(handle),
+        {
+          cacheId: id,
+          statusPrefix: "Cached ",
+        }
+      );
+      if (importedCount > 0) {
+        await saveCachedLocalDirectory({ id, name: handle.name, handle });
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setLocalOpenStatus("Folder selection cancelled.");
+        return;
+      }
+
+      setLocalOpenStatus(
+        error instanceof Error
+          ? `Unable to open folder: ${error.message}`
+          : "Unable to open folder."
+      );
+    }
+  };
+  const restoreCachedLocalModels = async (requestPermission = false) => {
+    if (!supportsFileSystemAccess()) {
+      setLocalOpenStatus("File System Access API is not available here.");
+      return;
+    }
+
+    try {
+      const cachedDirectories = await readCachedLocalDirectories();
+      const unloadedDirectories = cachedDirectories.filter(
+        (directory) =>
+          !localModelsRef.current.some(
+            (localModel) => localModel.cacheId === directory.id
+          )
+      );
+
+      if (unloadedDirectories.length === 0) {
+        setLocalOpenStatus("No cached local folders to restore.");
+        return;
+      }
+
+      let restoredModels = 0;
+      let blockedDirectories = 0;
+
+      for (const directory of unloadedDirectories) {
+        const hasPermission = await ensureDirectoryReadPermission(
+          directory.handle,
+          requestPermission
+        );
+
+        if (!hasPermission) {
+          blockedDirectories += 1;
+          continue;
+        }
+
+        restoredModels += await importLocalFileEntries(
+          await readDirectoryFiles(directory.handle),
+          {
+            cacheId: directory.id,
+            statusPrefix: "Restored cached ",
+          }
+        );
+      }
+
+      if (blockedDirectories > 0) {
+        setLocalOpenStatus(
+          requestPermission
+            ? "Cached folder permission was not granted."
+            : "Cached folder needs permission. Click Restore cached."
+        );
+        return;
+      }
+
+      if (restoredModels === 0) {
+        setLocalOpenStatus("No cached local models were restored.");
+      }
+    } catch (error) {
+      setLocalOpenStatus(
+        error instanceof Error
+          ? `Unable to restore cached models: ${error.message}`
+          : "Unable to restore cached models."
+      );
+    }
+  };
+  const clearLocalModels = async () => {
     const localUrls = new Set(localModels.map((model) => model.url));
 
     localModels.forEach((model) => {
@@ -909,98 +1317,71 @@ export function Live2DViewerClient({
     if (localUrls.has(selectedUrl)) {
       setSelectedUrl(catalogOptions[0]?.url ?? modelUrl);
     }
+    try {
+      await clearCachedLocalDirectories();
+    } catch {
+      setLocalOpenStatus("Local models cleared, but cached folder handles remain.");
+    }
+  };
+  const removeLocalModel = async (url: string) => {
+    const model = localModels.find((localModel) => localModel.url === url);
+    if (!model) return;
+    const cacheId = model.cacheId;
+    const removedCacheGroup = cacheId
+      ? localModels.filter((localModel) => localModel.cacheId === cacheId)
+      : [model];
+    const removedUrls = new Set(
+      removedCacheGroup.map((localModel) => localModel.url)
+    );
+
+    removedCacheGroup.forEach((localModel) => {
+      localModel.objectUrls.forEach((objectUrl) => URL.revokeObjectURL(objectUrl));
+    });
+    setLocalModels((current) =>
+      current.filter((localModel) => !removedUrls.has(localModel.url))
+    );
+    setLoadedUrls((current) => {
+      const next = new Set(current);
+      removedUrls.forEach((removedUrl) => next.delete(removedUrl));
+      return next;
+    });
+    setVisibleUrls((current) => {
+      const next = new Set(current);
+      removedUrls.forEach((removedUrl) => next.delete(removedUrl));
+      return next;
+    });
+    setLocalOpenStatus(
+      cacheId
+        ? `Removed cached folder for ${model.label}.`
+        : `Removed ${model.label}.`
+    );
+
+    if (removedUrls.has(selectedUrl)) {
+      const fallbackModel =
+        options.find((option) => !removedUrls.has(option.url)) ??
+        catalogOptions[0];
+      setSelectedUrl(fallbackModel?.url ?? modelUrl);
+    }
+
+    if (cacheId) {
+      try {
+        await deleteCachedLocalDirectory(cacheId);
+      } catch {
+        setLocalOpenStatus(
+          `Removed ${model.label}, but its cached folder handle remains.`
+        );
+      }
+    }
   };
   const handleOpenLocalModels = async (
     event: React.ChangeEvent<HTMLInputElement>
   ) => {
-    const selectedFiles = Array.from(event.target.files ?? []);
+    const selectedFiles = Array.from(event.target.files ?? []).map((file) => ({
+      file,
+      path: normalizeLocalPath(file.webkitRelativePath || file.name),
+    }));
     event.target.value = "";
-    if (selectedFiles.length === 0) {
-      setLocalOpenStatus("No files selected.");
-      return;
-    }
-
-    const modelFiles = selectedFiles.filter((file) =>
-      file.name.toLowerCase().endsWith(".model3.json")
-    );
-    if (modelFiles.length === 0) {
-      setLocalOpenStatus("No .model3.json file found in that selection.");
-      return;
-    }
-    const hasDirectoryPaths = selectedFiles.some((file) =>
-      Boolean(file.webkitRelativePath)
-    );
-    if (!hasDirectoryPaths && selectedFiles.length === modelFiles.length) {
-      setLocalOpenStatus(
-        "Selected .model3.json only. Open the model folder so textures and .moc3 files are included."
-      );
-      return;
-    }
-
-    const importedModels: LocalModelOption[] = [];
-    const createdUrls: string[] = [];
-
-    try {
-      for (const modelFile of modelFiles) {
-        const fileUrls = new Map<string, string>();
-        const objectUrls: string[] = [];
-
-        selectedFiles.forEach((file) => {
-          const url = URL.createObjectURL(file);
-          const path = normalizeLocalPath(file.webkitRelativePath || file.name);
-          fileUrls.set(path, url);
-          objectUrls.push(url);
-          createdUrls.push(url);
-        });
-
-        const modelPath = normalizeLocalPath(
-          modelFile.webkitRelativePath || modelFile.name
-        );
-        const settings = JSON.parse(
-          await modelFile.text()
-        ) as LocalModelSettings;
-        const rewrittenSettings = rewriteLocalModelSettings(
-          settings,
-          fileUrls,
-          dirname(modelPath)
-        );
-        const modelSettingsUrl = URL.createObjectURL(
-          new Blob([JSON.stringify(rewrittenSettings)], {
-            type: "application/json",
-          })
-        );
-        objectUrls.push(modelSettingsUrl);
-        createdUrls.push(modelSettingsUrl);
-
-        importedModels.push({
-          label: `Local: ${modelFile.name.replace(/\.model3\.json$/i, "")}`,
-          source: "local",
-          url: modelSettingsUrl,
-          objectUrls,
-        });
-      }
-    } catch (error) {
-      createdUrls.forEach((url) => URL.revokeObjectURL(url));
-      setLocalOpenStatus(
-        error instanceof Error
-          ? `Unable to open local model: ${error.message}`
-          : "Unable to open local model."
-      );
-      return;
-    }
-
-    setLocalModels((current) => [...current, ...importedModels]);
-    setSelectedUrl(importedModels[0].url);
-    importedModels.forEach((model) => loadModel(model.url));
-    setLocalOpenStatus(
-      `${importedModels.length} local model${
-        importedModels.length === 1 ? "" : "s"
-      } ready.`
-    );
-  };
-  const loadModel = (url: string, show = true) => {
-    setLoadedUrls((current) => new Set(current).add(url));
-    if (show) setVisibleUrls((current) => new Set(current).add(url));
+    await importLocalFileEntries(selectedFiles);
   };
   const unloadModel = (url: string) => {
     setLoadedUrls((current) => {
@@ -1015,6 +1396,7 @@ export function Live2DViewerClient({
     });
   };
   const toggleModelVisibility = (url: string) => {
+    selectModel(url);
     loadModel(url, false);
     setVisibleUrls((current) => {
       const next = new Set(current);
@@ -1027,9 +1409,15 @@ export function Live2DViewerClient({
     });
   };
   const loadAllModels = () => {
-    const urls = options.map((model) => model.url);
+    const urls = filteredOptions.map((model) => model.url);
     setLoadedUrls(new Set(urls));
     setVisibleUrls(new Set(urls));
+  };
+  const toggleModelSource = (source: ModelSource) => {
+    setEnabledModelSources((current) => ({
+      ...current,
+      [source]: !current[source],
+    }));
   };
   const moveLayer = (url: string, direction: "up" | "down") => {
     setLayerOrder((current) => {
@@ -1372,23 +1760,30 @@ export function Live2DViewerClient({
             ref={fileInputRef}
             type="file"
             multiple
-            accept=".json,.moc3,.png,.jpg,.jpeg,.webp,.motion3.json,.exp3.json,.physics3.json,.pose3.json"
+            accept=".model3.json,.json,.moc3,.png,.jpg,.jpeg,.webp,.motion3.json,.exp3.json,.physics3.json,.pose3.json"
             className="sr-only"
             onChange={handleOpenLocalModels}
           />
           <button
             className="ghost-button"
             type="button"
-            onClick={() => folderInputRef.current?.click()}
+            onClick={openLocalDirectory}
           >
             Open folder
           </button>
           <button
             className="inline-action"
             type="button"
+            onClick={() => restoreCachedLocalModels(true)}
+          >
+            Restore cached
+          </button>
+          <button
+            className="inline-action"
+            type="button"
             onClick={() => fileInputRef.current?.click()}
           >
-            File
+            Files
           </button>
           <button
             className="inline-action"
@@ -1410,11 +1805,21 @@ export function Live2DViewerClient({
               className="inline-action"
               type="button"
               onClick={loadAllModels}
-              disabled={options.length === 0}
+              disabled={filteredOptions.length === 0}
             >
               Load all
             </button>
           </div>
+
+          <label className="search-field model-search-field">
+            <span>Search</span>
+            <input
+              value={modelSearch}
+              onChange={(event) => setModelSearch(event.target.value)}
+              placeholder="Search model name..."
+              type="search"
+            />
+          </label>
 
           <div className="model-list" role="listbox" aria-label="Model list">
             {displayOptions.map((model) => {
@@ -1476,10 +1881,7 @@ export function Live2DViewerClient({
                   <button
                     className="model-select-button"
                     type="button"
-                    onClick={() => {
-                      setSelectedUrl(model.url);
-                      setParameterFilter("");
-                    }}
+                    onClick={() => selectModel(model.url)}
                   >
                     <span className="model-name">{model.label}</span>
                     <span className="model-source">
@@ -1498,11 +1900,14 @@ export function Live2DViewerClient({
                         role="switch"
                         aria-checked={isLoaded}
                         aria-label="Load model"
-                        onClick={() =>
-                          isLoaded
-                            ? unloadModel(model.url)
-                            : loadModel(model.url)
-                        }
+                        onClick={() => {
+                          selectModel(model.url);
+                          if (isLoaded) {
+                            unloadModel(model.url);
+                          } else {
+                            loadModel(model.url);
+                          }
+                        }}
                       >
                         <span className="switch-track" aria-hidden="true" />
                         <span className="switch-label">&#21152;&#36733;</span>
@@ -1541,6 +1946,17 @@ export function Live2DViewerClient({
                       >
                         <span aria-hidden="true">&#8595;</span>
                       </button>
+                      {model.source === "local" ? (
+                        <button
+                          className="layer-button danger"
+                          type="button"
+                          onClick={() => removeLocalModel(model.url)}
+                          title="Remove local model"
+                          aria-label="Remove local model"
+                        >
+                          <span aria-hidden="true">&#215;</span>
+                        </button>
+                      ) : null}
                     </div>
                   </div>
                 </div>
@@ -1554,21 +1970,31 @@ export function Live2DViewerClient({
               sidebar.
             </p>
           ) : null}
+          {options.length > 0 && displayOptions.length === 0 ? (
+            <p className="empty-copy">No models match the current filters.</p>
+          ) : null}
         </div>
 
         <div className="sidebar-footer">
-          <div className="stat-card">
-            <span>Local</span>
-            <strong>{modelCounts.local}</strong>
-          </div>
-          <div className="stat-card">
-            <span>Custom</span>
-            <strong>{modelCounts.models}</strong>
-          </div>
-          <div className="stat-card">
-            <span>Samples</span>
-            <strong>{modelCounts.samples}</strong>
-          </div>
+          {MODEL_SOURCE_OPTIONS.map((option) => {
+            const enabled = enabledModelSources[option.source];
+
+            return (
+              <button
+                aria-checked={enabled}
+                className={`stat-card source-toggle${
+                  enabled ? " active" : ""
+                }`}
+                key={option.source}
+                onClick={() => toggleModelSource(option.source)}
+                role="switch"
+                type="button"
+              >
+                <span>{option.label}</span>
+                <strong>{modelCounts[option.source]}</strong>
+              </button>
+            );
+          })}
         </div>
       </aside>
 
@@ -1578,8 +2004,85 @@ export function Live2DViewerClient({
             <p className="eyebrow">Loaded Models</p>
             <h2>{selectedModel?.label ?? "No model found"}</h2>
           </div>
-          <div className="model-path" title={selectedUrl}>
-            {visibleLoadedModels.length}/{loadedModels.length} visible
+          <div className="stage-status-group">
+            <div className="model-path" title={selectedUrl}>
+              {visibleLoadedModels.length}/{loadedModels.length} visible
+            </div>
+            <details className="model-diagnostics">
+              <summary
+                title={
+                  selectedModelDiagnostics?.hiddenMaskSourceIds.length
+                    ? selectedModelDiagnostics.hiddenMaskSourceIds.join(", ")
+                    : `Clipping diagnostics: ${selectedModelDiagnosticStatus}`
+                }
+              >
+                <span>Mask</span>
+                <strong>
+                  {selectedModelDiagnostics
+                    ? `${selectedModelDiagnostics.maskPermutationCount}/36`
+                    : selectedModelDiagnosticStatus}
+                </strong>
+                {selectedModelDiagnostics?.exceedsWebMaskLimit ? (
+                  <em>{selectedModelDiagnostics.maskBufferCount} buffers</em>
+                ) : null}
+                {selectedModelDiagnostics?.hiddenMaskSourceIds.length ? (
+                  <em>hidden</em>
+                ) : null}
+              </summary>
+              <div className="model-diagnostics-panel">
+                {selectedModelDiagnostics ? (
+                  <>
+                    <div className="diagnostics-title">
+                      {diagnosticsModel?.label ?? "Current model"}
+                    </div>
+                    <dl>
+                      <div>
+                        <dt>Clipped layers</dt>
+                        <dd>{selectedModelDiagnostics.clippingDrawableCount}</dd>
+                      </div>
+                      <div>
+                        <dt>Mask sources</dt>
+                        <dd>{selectedModelDiagnostics.maskSourceCount}</dd>
+                      </div>
+                      <div>
+                        <dt>Mask buffers</dt>
+                        <dd>{selectedModelDiagnostics.maskBufferCount}</dd>
+                      </div>
+                      <div>
+                        <dt>Mask size</dt>
+                        <dd>
+                          {selectedModelDiagnostics.clippingMaskBufferSize}px
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Blend</dt>
+                        <dd>{selectedModelDiagnostics.usesBlendMode ? "on" : "off"}</dd>
+                      </div>
+                      <div>
+                        <dt>Offscreen mask</dt>
+                        <dd>
+                          {selectedModelDiagnostics.usesOffscreenMasking
+                            ? "on"
+                            : "off"}
+                        </dd>
+                      </div>
+                    </dl>
+                    {selectedModelDiagnostics.hiddenMaskSourceIds.length > 0 ? (
+                      <p title={selectedModelDiagnostics.hiddenMaskSourceIds.join(", ")}>
+                        Hidden source:{" "}
+                        {selectedModelDiagnostics.hiddenMaskSourceIds.length}
+                      </p>
+                    ) : null}
+                  </>
+                ) : (
+                  <p>
+                    {selectedModelDiagnosticStatus === "waiting"
+                      ? "Waiting for model data."
+                      : selectedModelDiagnosticStatus}
+                  </p>
+                )}
+              </div>
+            </details>
           </div>
         </header>
 
@@ -1609,6 +2112,11 @@ export function Live2DViewerClient({
                   parameterUpdateFps,
                   onParametersLoaded: (loadedParameters) =>
                     handleParametersLoaded(model.url, loadedParameters),
+                  onModelDiagnostics: (diagnostics) =>
+                    setModelDiagnosticsByUrl((current) => ({
+                      ...current,
+                      [model.url]: diagnostics,
+                    })),
                   onParameterValuesChanged: (values) =>
                     setLiveParameterValuesByUrl((current) => ({
                       ...current,

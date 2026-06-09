@@ -27,8 +27,11 @@ export interface Live2DViewerProps {
   onParametersLoaded?: (parameters: Live2DParameter[]) => void;
   onParameterValuesChanged?: (values: Record<string, number>) => void;
   onViewTransformChanged?: (transform: Live2DViewTransform) => void;
+  onModelDiagnostics?: (diagnostics: Live2DModelDiagnostics) => void;
   onMotionsLoaded?: (motions: Live2DMotionOption[]) => void;
   onExpressionsLoaded?: (expressions: Live2DExpressionOption[]) => void;
+  transparentCanvas?: boolean;
+  backgroundColor?: Live2DBackgroundColor;
 }
 
 export type Live2DBlendMode = "normal" | "multiply";
@@ -46,6 +49,8 @@ export interface Live2DMultiViewerProps {
   height?: number;
   fitToContainer?: boolean;
   selectedModelUrl?: string;
+  transparentCanvas?: boolean;
+  backgroundColor?: Live2DBackgroundColor;
 }
 
 export interface Live2DEffectSettings {
@@ -60,6 +65,21 @@ export interface Live2DViewTransform {
   panX: number;
   panY: number;
   zoom: number;
+}
+
+export type Live2DBackgroundColor = [number, number, number, number];
+
+export interface Live2DModelDiagnostics {
+  drawableCount: number;
+  clippingDrawableCount: number;
+  maskSourceCount: number;
+  maskPermutationCount: number;
+  hiddenMaskSourceIds: string[];
+  exceedsWebMaskLimit: boolean;
+  maskBufferCount: number;
+  clippingMaskBufferSize: number;
+  usesBlendMode: boolean;
+  usesOffscreenMasking: boolean;
 }
 
 export interface Live2DParameter {
@@ -98,12 +118,26 @@ const CUBISM_SHADER_DIR = "/live2dcubism/Framework/Shaders/WebGL/";
 const scriptPromises = new Map<string, Promise<void>>();
 let frameworkStarted = false;
 const ignoreMotionEvent = () => undefined;
+const DEFAULT_BACKGROUND_COLOR: Live2DBackgroundColor = [0, 0, 0, 0];
 const DEFAULT_EFFECT_SETTINGS: Required<Live2DEffectSettings> = {
   idle: false,
   eyeBlink: false,
   breath: false,
   physics: false,
   pose: false,
+};
+let vertexPositionsDidChangeBit: number | null = null;
+
+type CubismWebGLRendererLike = {
+  initialize: (model: any, maskBufferCount?: number) => void;
+  startUp: (gl: WebGL2RenderingContext) => void;
+  setClippingMaskBufferSize?: (size: number) => void;
+  setIsPremultipliedAlpha: (enabled: boolean) => void;
+  setMvpMatrix: (matrix: any) => void;
+  setRenderState: (fbo: WebGLFramebuffer | null, viewport: number[]) => void;
+  bindTexture: (index: number, texture: WebGLTexture) => void;
+  drawModel: (shaderPath?: string) => void;
+  release: () => void;
 };
 
 interface ModelSettings {
@@ -594,6 +628,130 @@ function createBreath(
   return breath;
 }
 
+function setRendererTargetState(
+  renderer: CubismWebGLRendererLike,
+  fbo: WebGLFramebuffer | null,
+  width: number,
+  height: number
+) {
+  renderer.setRenderState(fbo, [0, 0, width, height]);
+}
+
+function getVertexPositionsDidChangeBit() {
+  if (vertexPositionsDidChangeBit !== null) return vertexPositionsDidChangeBit;
+
+  const utils = (window as any).Live2DCubismCore?.Utils;
+  for (let bit = 1; bit < 256; bit <<= 1) {
+    if (utils?.hasVertexPositionsDidChangeBit(bit)) {
+      vertexPositionsDidChangeBit = bit;
+      return bit;
+    }
+  }
+
+  vertexPositionsDidChangeBit = 0;
+  return vertexPositionsDidChangeBit;
+}
+
+function markClippingMaskSourcesDirty(cubismModel: {
+  getModel: () => Live2DCubismCore.Model;
+}) {
+  const bit = getVertexPositionsDidChangeBit();
+  if (bit === 0) return;
+
+  const drawables = cubismModel.getModel().drawables;
+  const maskSourceIndices = new Set<number>();
+
+  for (let drawableIndex = 0; drawableIndex < drawables.count; drawableIndex++) {
+    const maskCount = drawables.maskCounts[drawableIndex] ?? 0;
+    const masks = drawables.masks[drawableIndex];
+
+    for (let maskIndex = 0; maskIndex < maskCount; maskIndex++) {
+      const maskDrawableIndex = masks?.[maskIndex];
+      if (maskDrawableIndex === undefined || maskDrawableIndex < 0) continue;
+
+      maskSourceIndices.add(maskDrawableIndex);
+    }
+  }
+
+  maskSourceIndices.forEach((maskDrawableIndex) => {
+    drawables.dynamicFlags[maskDrawableIndex] |= bit;
+  });
+}
+
+function collectModelDiagnostics(cubismModel: {
+  getModel: () => Live2DCubismCore.Model;
+  isBlendModeEnabled?: () => boolean;
+  isUsingMaskingForOffscreen?: () => boolean;
+}): Live2DModelDiagnostics {
+  const coreModel = cubismModel.getModel();
+  const drawables = coreModel.drawables;
+  const maskSourceIndices = new Set<number>();
+  const maskPermutations = new Set<string>();
+  let clippingDrawableCount = 0;
+
+  for (let drawableIndex = 0; drawableIndex < drawables.count; drawableIndex++) {
+    const maskCount = drawables.maskCounts[drawableIndex] ?? 0;
+    const masks = drawables.masks[drawableIndex];
+
+    if (maskCount <= 0 || !masks) continue;
+
+    clippingDrawableCount += 1;
+    const maskIds: number[] = [];
+    for (let maskIndex = 0; maskIndex < maskCount; maskIndex++) {
+      const maskDrawableIndex = masks[maskIndex];
+      if (maskDrawableIndex === undefined || maskDrawableIndex < 0) continue;
+
+      maskSourceIndices.add(maskDrawableIndex);
+      maskIds.push(maskDrawableIndex);
+    }
+    maskPermutations.add(maskIds.join(","));
+  }
+
+  const hiddenMaskSourceIds = Array.from(maskSourceIndices)
+    .filter((maskDrawableIndex) => {
+      const flag = drawables.dynamicFlags[maskDrawableIndex];
+      return !Live2DCubismCore.Utils.hasIsVisibleBit(flag);
+    })
+    .map(
+      (maskDrawableIndex) =>
+        drawables.ids[maskDrawableIndex] ?? `Drawable ${maskDrawableIndex}`
+    );
+  const clippingMaskBufferSize =
+    maskPermutations.size > 36 || clippingDrawableCount > 80
+      ? 4096
+      : maskPermutations.size > 0
+        ? 1024
+        : 256;
+  const maskBufferCount =
+    maskPermutations.size <= 36
+      ? 1
+      : Math.max(2, Math.ceil(maskPermutations.size / 16));
+
+  return {
+    drawableCount: drawables.count,
+    clippingDrawableCount,
+    maskSourceCount: maskSourceIndices.size,
+    maskPermutationCount: maskPermutations.size,
+    hiddenMaskSourceIds,
+    exceedsWebMaskLimit: maskPermutations.size > 36,
+    maskBufferCount,
+    clippingMaskBufferSize,
+    usesBlendMode: cubismModel.isBlendModeEnabled?.() ?? false,
+    usesOffscreenMasking: cubismModel.isUsingMaskingForOffscreen?.() ?? false,
+  };
+}
+
+function getMaskBufferCount(diagnostics: Live2DModelDiagnostics) {
+  return diagnostics.maskBufferCount;
+}
+
+function configureClippingMaskBuffer(
+  renderer: CubismWebGLRendererLike,
+  diagnostics: Live2DModelDiagnostics
+) {
+  renderer.setClippingMaskBufferSize?.(diagnostics.clippingMaskBufferSize);
+}
+
 /**
  * Renders a Live2D Cubism 5 model on a WebGL canvas.
  *
@@ -618,8 +776,11 @@ export function Live2DViewer({
   onParametersLoaded,
   onParameterValuesChanged,
   onViewTransformChanged,
+  onModelDiagnostics,
   onMotionsLoaded,
   onExpressionsLoaded,
+  transparentCanvas = true,
+  backgroundColor = DEFAULT_BACKGROUND_COLOR,
 }: Live2DViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -631,6 +792,7 @@ export function Live2DViewer({
   const onParametersLoadedRef = useRef(onParametersLoaded);
   const onParameterValuesChangedRef = useRef(onParameterValuesChanged);
   const onViewTransformChangedRef = useRef(onViewTransformChanged);
+  const onModelDiagnosticsRef = useRef(onModelDiagnostics);
   const onMotionsLoadedRef = useRef(onMotionsLoaded);
   const onExpressionsLoadedRef = useRef(onExpressionsLoaded);
   const motionRequestRef = useRef(motionRequest);
@@ -669,6 +831,9 @@ export function Live2DViewer({
   useEffect(() => {
     onViewTransformChangedRef.current = onViewTransformChanged;
   }, [onViewTransformChanged]);
+  useEffect(() => {
+    onModelDiagnosticsRef.current = onModelDiagnostics;
+  }, [onModelDiagnostics]);
 
   useEffect(() => {
     onMotionsLoadedRef.current = onMotionsLoaded;
@@ -782,7 +947,7 @@ export function Live2DViewer({
     let cubismMoc: { createModel: () => any; deleteModel: (model: any) => void; release: () => void } | null = null;
     let cubismModel: any = null;
     let glContext: WebGL2RenderingContext | null = null;
-    let renderer: { initialize: (model: any) => void; startUp: (gl: WebGL2RenderingContext) => void; setIsPremultipliedAlpha: (enabled: boolean) => void; setMvpMatrix: (matrix: any) => void; bindTexture: (index: number, texture: WebGLTexture) => void; drawModel: (shaderPath?: string) => void; release: () => void } | null = null;
+    let renderer: CubismWebGLRendererLike | null = null;
     let textures: WebGLTexture[] = [];
     let motionManager: any = null;
     let expressionManager: any = null;
@@ -901,6 +1066,8 @@ export function Live2DViewer({
       onParametersLoadedRef.current?.(
         getLive2DParameters(cubismModel, parameterNames)
       );
+      const diagnostics = collectModelDiagnostics(cubismModel);
+      onModelDiagnosticsRef.current?.(diagnostics);
       motionManager = new CubismMotionManager();
       motionManager.setEventCallback(ignoreMotionEvent);
       expressionManager = new CubismExpressionMotionManager();
@@ -1033,7 +1200,7 @@ export function Live2DViewer({
 
       const gl = canvas.getContext("webgl2", {
         premultipliedAlpha: true,
-        alpha: true,
+        alpha: transparentCanvas,
       });
       if (!gl) {
         console.error(
@@ -1058,7 +1225,8 @@ export function Live2DViewer({
       if (stopped) return;
 
       renderer = new CubismRenderer_WebGL(canvas.width, canvas.height);
-      renderer.initialize(cubismModel);
+      renderer.initialize(cubismModel, getMaskBufferCount(diagnostics));
+      configureClippingMaskBuffer(renderer, diagnostics);
       renderer.startUp(glContext);
       renderer.setIsPremultipliedAlpha(true);
       renderer.setMvpMatrix(
@@ -1149,7 +1317,7 @@ export function Live2DViewer({
         }
 
         glContext.viewport(0, 0, canvasElement.width, canvasElement.height);
-        glContext.clearColor(0, 0, 0, 0);
+        glContext.clearColor(...backgroundColor);
         glContext.clear(glContext.COLOR_BUFFER_BIT);
         cubismModel.update();
         renderer.setMvpMatrix(
@@ -1162,6 +1330,13 @@ export function Live2DViewer({
             viewTransformRef.current
           )
         );
+        setRendererTargetState(
+          renderer,
+          null,
+          canvasElement.width,
+          canvasElement.height
+        );
+        markClippingMaskSourcesDirty(cubismModel);
         renderer.drawModel(CUBISM_SHADER_DIR);
         rafId = requestAnimationFrame(tick);
       }
@@ -1183,7 +1358,14 @@ export function Live2DViewer({
       if (cubismMoc && cubismModel) cubismMoc.deleteModel(cubismModel);
       cubismMoc?.release();
     };
-  }, [displaySize.height, displaySize.width, modelUrl, pixelRatio]);
+  }, [
+    backgroundColor,
+    displaySize.height,
+    displaySize.width,
+    modelUrl,
+    pixelRatio,
+    transparentCanvas,
+  ]);
 
   return (
     <div
@@ -1231,6 +1413,8 @@ export function Live2DMultiViewer({
   height = 600,
   fitToContainer = false,
   selectedModelUrl,
+  transparentCanvas = true,
+  backgroundColor = DEFAULT_BACKGROUND_COLOR,
 }: Live2DMultiViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -1381,7 +1565,7 @@ export function Live2DMultiViewer({
 
     model.viewTransformRef.current = {
       ...model.viewTransformRef.current,
-      zoom: Math.min(4, Math.max(0.35, nextZoom)),
+      zoom: Math.max(0.01, nextZoom),
     };
     model.onViewTransformChanged?.(model.viewTransformRef.current);
   };
@@ -1412,15 +1596,7 @@ export function Live2DMultiViewer({
         release: () => void;
       } | null;
       cubismModel: any;
-      renderer: {
-        initialize: (model: any) => void;
-        startUp: (gl: WebGL2RenderingContext) => void;
-        setIsPremultipliedAlpha: (enabled: boolean) => void;
-        setMvpMatrix: (matrix: any) => void;
-        bindTexture: (index: number, texture: WebGLTexture) => void;
-        drawModel: (shaderPath?: string) => void;
-        release: () => void;
-      } | null;
+      renderer: CubismWebGLRendererLike | null;
       renderTarget: ReturnType<typeof createLayerRenderTarget> | null;
       textures: WebGLTexture[];
       motionManager: any;
@@ -1482,7 +1658,7 @@ export function Live2DMultiViewer({
 
       const gl = canvas.getContext("webgl2", {
         premultipliedAlpha: true,
-        alpha: true,
+        alpha: transparentCanvas,
       });
       if (!gl) {
         console.error(
@@ -1583,6 +1759,8 @@ export function Live2DMultiViewer({
           ?.onParametersLoaded?.(
             getLive2DParameters(cubismModel, parameterNames)
           );
+        const diagnostics = collectModelDiagnostics(cubismModel);
+        modelRefs.current.get(modelUrl)?.onModelDiagnostics?.(diagnostics);
 
         const motionManager = new CubismMotionManager();
         const expressionManager = new CubismExpressionMotionManager();
@@ -1780,7 +1958,8 @@ export function Live2DMultiViewer({
         }
 
         const renderer = new CubismRenderer_WebGL(canvas.width, canvas.height);
-        renderer.initialize(cubismModel);
+        renderer.initialize(cubismModel, getMaskBufferCount(diagnostics));
+        configureClippingMaskBuffer(renderer, diagnostics);
         renderer.startUp(gl);
         renderer.setIsPremultipliedAlpha(true);
         renderer.setMvpMatrix(
@@ -1835,11 +2014,16 @@ export function Live2DMultiViewer({
           const shouldRender =
             Boolean(config) &&
             (config?.visible !== false || maskModelUrls.has(layer.modelUrl));
+          const shouldRenderTarget =
+            Boolean(config) &&
+            (maskModelUrls.has(layer.modelUrl) ||
+              (config?.visible !== false &&
+                (Boolean(config?.clipToModelUrl) ||
+                  (config?.blendMode ?? "normal") !== "normal")));
           if (
             !config ||
             !shouldRender ||
-            !layer.renderer ||
-            !layer.renderTarget
+            !layer.renderer
           ) {
             return;
           }
@@ -1938,36 +2122,72 @@ export function Live2DMultiViewer({
           }
 
           layer.cubismModel.update();
-          glContext.bindFramebuffer(
-            glContext.FRAMEBUFFER,
-            layer.renderTarget.framebuffer
-          );
-          glContext.viewport(0, 0, canvas.width, canvas.height);
-          glContext.clearColor(0, 0, 0, 0);
-          glContext.clear(glContext.COLOR_BUFFER_BIT);
-          layer.renderer.setMvpMatrix(
-            createMvpMatrix(
-              CubismMatrix44,
-              CubismModelMatrix,
-              layer.cubismModel,
-              canvas,
-              layer.settings.Layout,
-              config.viewTransformRef.current
-            )
-          );
-          layer.renderer.drawModel(CUBISM_SHADER_DIR);
+          if (shouldRenderTarget && layer.renderTarget) {
+            glContext.bindFramebuffer(
+              glContext.FRAMEBUFFER,
+              layer.renderTarget.framebuffer
+            );
+            glContext.viewport(0, 0, canvas.width, canvas.height);
+            glContext.clearColor(0, 0, 0, 0);
+            glContext.clear(glContext.COLOR_BUFFER_BIT);
+            layer.renderer.setMvpMatrix(
+              createMvpMatrix(
+                CubismMatrix44,
+                CubismModelMatrix,
+                layer.cubismModel,
+                canvas,
+                layer.settings.Layout,
+                config.viewTransformRef.current
+              )
+            );
+            setRendererTargetState(
+              layer.renderer,
+              layer.renderTarget.framebuffer,
+              canvas.width,
+              canvas.height
+            );
+            markClippingMaskSourcesDirty(layer.cubismModel);
+            layer.renderer.drawModel(CUBISM_SHADER_DIR);
+          }
         });
 
         glContext.bindFramebuffer(glContext.FRAMEBUFFER, null);
         glContext.viewport(0, 0, canvas.width, canvas.height);
-        glContext.clearColor(0, 0, 0, 0);
+        glContext.clearColor(...backgroundColor);
         glContext.clear(glContext.COLOR_BUFFER_BIT);
 
         runtimeLayers.forEach((layer) => {
           const config = modelRefs.current.get(layer.modelUrl);
-          if (!config || config.visible === false || !layer.renderTarget) {
+          if (!config || config.visible === false || !layer.renderer) {
             return;
           }
+          const shouldComposite =
+            Boolean(config.clipToModelUrl) ||
+            (config.blendMode ?? "normal") !== "normal";
+
+          if (!shouldComposite) {
+            layer.renderer.setMvpMatrix(
+              createMvpMatrix(
+                CubismMatrix44,
+                CubismModelMatrix,
+                layer.cubismModel,
+                canvas,
+                layer.settings.Layout,
+                config.viewTransformRef.current
+              )
+            );
+            setRendererTargetState(
+              layer.renderer,
+              null,
+              canvas.width,
+              canvas.height
+            );
+            markClippingMaskSourcesDirty(layer.cubismModel);
+            layer.renderer.drawModel(CUBISM_SHADER_DIR);
+            return;
+          }
+
+          if (!layer.renderTarget) return;
 
           const maskLayer = config.clipToModelUrl
             ? layersByUrl.get(config.clipToModelUrl)
@@ -2001,7 +2221,14 @@ export function Live2DMultiViewer({
         }
       }
     };
-  }, [displaySize.height, displaySize.width, modelUrlsKey, pixelRatio]);
+  }, [
+    backgroundColor,
+    displaySize.height,
+    displaySize.width,
+    modelUrlsKey,
+    pixelRatio,
+    transparentCanvas,
+  ]);
 
   return (
     <div
